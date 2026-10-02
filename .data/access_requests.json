@@ -1,0 +1,12 @@
+[
+  {
+    "id": "req_kit_g3nity",
+    "email": "kit.g3nity@gmail.com",
+    "fullName": "Kit G",
+    "organization": "TEst",
+    "requestedRole": "OPERATOR",
+    "reason": "test",
+    "status": "PENDING",
+    "submittedAt": "2026-09-17T13:37:20.090Z"
+  }
+]

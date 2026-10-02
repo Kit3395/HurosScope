@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 140 140" fill="none">
+  <!-- Gold Target Crosshair Ring -->
+  <circle cx="70" cy="70" r="50" stroke="#C59B27" stroke-width="5" />
+  <line x1="70" y1="8" x2="70" y2="28" stroke="#C59B27" stroke-width="5" stroke-linecap="round" />
+  <line x1="70" y1="112" x2="70" y2="132" stroke="#C59B27" stroke-width="5" stroke-linecap="round" />
+  <line x1="8" y1="70" x2="28" y2="70" stroke="#C59B27" stroke-width="5" stroke-linecap="round" />
+  <line x1="112" y1="70" x2="132" y2="70" stroke="#C59B27" stroke-width="5" stroke-linecap="round" />
+
+  <!-- Eye of Horus Wadjet -->
+  <path d="M 36 44 C 54 33 86 33 106 44 Z" fill="#0F172A" />
+  <path d="M 32 66 C 48 50 86 48 112 62" stroke="#0F172A" stroke-width="5" stroke-linecap="round" />
+  <path d="M 32 66 C 52 78 88 77 106 66" stroke="#0F172A" stroke-width="4" stroke-linecap="round" />
+  <circle cx="72" cy="64" r="14" stroke="#C59B27" stroke-width="3" />
+  <circle cx="72" cy="64" r="6" stroke="#C59B27" stroke-width="2.5" />
+  <circle cx="72" cy="64" r="2.5" fill="#C59B27" />
+  <line x1="72" y1="46" x2="72" y2="82" stroke="#C59B27" stroke-width="2" />
+  <line x1="54" y1="64" x2="90" y2="64" stroke="#C59B27" stroke-width="2" />
+  <path d="M 82 72 L 82 104 L 86 104 L 86 70 Z" fill="#0F172A" />
+  <path d="M 64 76 C 50 86 44 94 44 100 C 44 106 50 106 54 100" stroke="#0F172A" stroke-width="3.5" stroke-linecap="round" />
+</svg>

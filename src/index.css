@@ -1,0 +1,596 @@
+@import "tailwindcss";
+
+/* ==========================================================================
+   HORUSCOPE SOVEREIGN THEME ENGINE: MINIMALIST LIGHT ARCHITECTURE
+   (Dark mode retired permanently per system specification)
+   ========================================================================== */
+
+:root {
+  color-scheme: light;
+  --bg-canvas: #f8fafc;
+  --bg-surface: #ffffff;
+  --bg-subtle: #f1f5f9;
+  --border-color: #e2e8f0;
+  --border-subtle: #f1f5f9;
+  --text-primary: #0f172a;
+  --text-secondary: #334155;
+  --text-muted: #475569;
+}
+
+/* Base Body */
+body {
+  background-color: #f8fafc;
+  color: #0f172a;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ==========================================================================
+   MINIMALIST WHITE SOVEREIGN UI: WCAG AAA CONTRAST & LEGIBILITY
+   ========================================================================== */
+html {
+  color-scheme: light !important;
+
+  /* 1. Surfaces, Canvas & Page Backgrounds */
+  body:not(:has(.horuscope-auth-page)) {
+    background-color: #f8fafc !important;
+    color: #0f172a !important;
+  }
+
+  body:not(:has(.horuscope-auth-page)) main,
+  .app-workspace main,
+  .bg-slate-950:not(button):not(input):not(select):not(textarea):not(code):not(pre):not(.horuscope-auth-page):not(.horuscope-auth-page *) {
+    background-color: #f8fafc !important;
+    color: #0f172a !important;
+  }
+
+  /* 2. Structural Cards, Panels, Modals, Overlays (Exclude Buttons) */
+  div.bg-slate-900,
+  section.bg-slate-900,
+  article.bg-slate-900,
+  aside.bg-slate-900,
+  nav.bg-slate-900,
+  header.bg-slate-900,
+  form.bg-slate-900 {
+    background-color: #ffffff !important;
+    border-color: #e2e8f0 !important;
+    color: #0f172a !important;
+    box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.05), 0 1px 2px -1px rgb(0 0 0 / 0.05);
+  }
+
+  /* Sub-cards and nested containers */
+  div.bg-slate-850,
+  div.bg-slate-900\/90,
+  div.bg-slate-900\/80,
+  div.bg-slate-900\/70,
+  div.bg-slate-900\/60,
+  div.bg-slate-900\/50,
+  div.bg-slate-900\/40,
+  div.bg-slate-950\/90,
+  div.bg-slate-950\/80,
+  div.bg-slate-950\/70,
+  div.bg-slate-950\/60,
+  div.bg-slate-950\/50,
+  div.bg-slate-950\/40 {
+    background-color: #f8fafc !important;
+    border-color: #e2e8f0 !important;
+  }
+
+  /* Inner data wells, statistic sub-boxes, and muted blocks */
+  div.bg-slate-800,
+  div.bg-slate-800\/80,
+  div.bg-slate-800\/60,
+  div.bg-slate-800\/50,
+  div.bg-slate-800\/40,
+  div.bg-slate-800\/30 {
+    background-color: #f1f5f9 !important;
+    border-color: #e2e8f0 !important;
+  }
+
+  /* 3. Universal Borders */
+  .border-slate-800,
+  .border-slate-800\/80,
+  .border-slate-800\/60,
+  .border-slate-800\/50,
+  .border-slate-800\/40,
+  .border-slate-700,
+  .border-slate-700\/80,
+  .border-slate-700\/60,
+  .border-slate-700\/50 {
+    border-color: #e2e8f0 !important;
+  }
+
+  /* 4. Headings & Structural Typography */
+  body:not(:has(.horuscope-auth-page)) :is(h1, h2, h3, h4, h5, h6),
+  .app-workspace :is(h1, h2, h3, h4, h5, h6) {
+    color: #0f172a !important;
+  }
+
+  /* 5. TEXT CONTRAST & LEGIBILITY RULES */
+  /* General text on cards (excluding buttons and colored badges) */
+  .app-workspace .text-white:not(button):not(button *):not(.badge-content):not([class*="bg-cyan-600"]):not([class*="bg-blue-600"]):not([class*="bg-emerald-600"]):not([class*="bg-purple-600"]):not([class*="bg-amber-500"]):not([class*="bg-rose-600"]):not([class*="bg-indigo-600"]):not([class*="bg-red-600"]):not([class*="bg-slate-900"]),
+  .app-workspace .text-slate-100:not(button):not(button *):not([class*="bg-cyan-600"]):not([class*="bg-blue-600"]):not([class*="bg-emerald-600"]):not([class*="bg-purple-600"]):not([class*="bg-amber-500"]):not([class*="bg-rose-600"]):not([class*="bg-indigo-600"]):not([class*="bg-red-600"]):not([class*="bg-slate-900"]) {
+    color: #0f172a !important;
+  }
+
+  /* Secondary & body typography - High contrast WCAG AAA (contrast ratio > 7:1) */
+  .app-workspace .text-slate-200:not(button):not(button *) {
+    color: #1e293b !important;
+  }
+
+  .app-workspace .text-slate-300:not(button):not(button *) {
+    color: #334155 !important;
+  }
+
+  .app-workspace .text-slate-400:not(button):not(button *) {
+    color: #475569 !important;
+  }
+
+  .app-workspace .text-slate-500:not(button):not(button *) {
+    color: #475569 !important;
+  }
+
+  .app-workspace .text-slate-600:not(button):not(button *) {
+    color: #1e293b !important;
+  }
+
+  /* 6. ACCENT COLORS CONVERTED FROM LOW-CONTRAST PASTELS TO HIGH-CONTRAST SATURATED TONES */
+  /* Blue */
+  .text-blue-400,
+  .text-blue-300 {
+    color: #1d4ed8 !important; /* blue-700 */
+  }
+
+  /* Cyan */
+  .text-cyan-400,
+  .text-cyan-300 {
+    color: #0e7490 !important; /* cyan-700 */
+  }
+
+  /* Sky */
+  .text-sky-400,
+  .text-sky-300 {
+    color: #0369a1 !important; /* sky-700 */
+  }
+
+  /* Emerald */
+  .text-emerald-400,
+  .text-emerald-300 {
+    color: #047857 !important; /* emerald-700 */
+  }
+
+  /* Teal */
+  .text-teal-400,
+  .text-teal-300 {
+    color: #0f766e !important; /* teal-700 */
+  }
+
+  /* Amber & Yellow */
+  .text-amber-400,
+  .text-amber-300 {
+    color: #92400e !important; /* amber-800 */
+  }
+  .text-yellow-400,
+  .text-yellow-300 {
+    color: #854d0e !important; /* yellow-800 */
+  }
+
+  /* Rose & Red */
+  .text-rose-400,
+  .text-rose-300,
+  .text-red-400,
+  .text-red-300 {
+    color: #be123c !important; /* rose-700 */
+  }
+
+  /* Violet */
+  .text-violet-400,
+  .text-violet-300 {
+    color: #6d28d9 !important; /* violet-700 */
+  }
+
+  /* Purple */
+  .text-purple-400,
+  .text-purple-300 {
+    color: #7e22ce !important; /* purple-700 */
+  }
+
+  /* Indigo */
+  .text-indigo-400,
+  .text-indigo-300 {
+    color: #4338ca !important; /* indigo-700 */
+  }
+
+  /* 7. BUTTONS AND INTERACTIVE ELEMENTS */
+
+  /* A. Solid Dark Primary Buttons (e.g. active Nav button, dark action buttons) */
+  button.bg-slate-900,
+  button.bg-slate-950,
+  button[class*="bg-slate-900"],
+  a.bg-slate-900 {
+    background-color: #0f172a !important;
+    border-color: #0f172a !important;
+    color: #ffffff !important;
+  }
+
+  button.bg-slate-900:hover,
+  button.bg-slate-950:hover {
+    background-color: #1e293b !important;
+    color: #ffffff !important;
+  }
+
+  /* Ensure text and SVG icons inside dark buttons stay brilliant white */
+  button.bg-slate-900 *,
+  button.bg-slate-950 *,
+  button[class*="bg-slate-900"] * {
+    color: #ffffff !important;
+  }
+
+  /* Except specific colored status tags inside buttons */
+  button.bg-slate-900 span[class*="bg-amber-500"] {
+    background-color: #f59e0b !important;
+    color: #0f172a !important;
+  }
+
+  /* B. Secondary / Ghost Buttons (e.g. Import, Export, DB Tree, Settings buttons) */
+  button.bg-slate-800:not([class*="text-white"]),
+  button.bg-slate-850,
+  button[class*="border-slate-800"]:not([class*="bg-slate-900"]):not([class*="bg-cyan"]):not([class*="bg-blue"]):not([class*="bg-amber"]):not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-purple"]):not([class*="bg-indigo"]) {
+    background-color: #ffffff !important;
+    border-color: #cbd5e1 !important;
+    color: #1e293b !important;
+  }
+
+  button.bg-slate-800:hover,
+  button[class*="border-slate-800"]:hover:not([class*="bg-slate-900"]):not([class*="bg-cyan"]):not([class*="bg-blue"]):not([class*="bg-amber"]):not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-purple"]):not([class*="bg-indigo"]) {
+    background-color: #f1f5f9 !important;
+    border-color: #94a3b8 !important;
+    color: #0f172a !important;
+  }
+
+  /* Secondary button icons */
+  button.bg-slate-800 svg,
+  button[class*="border-slate-800"]:not([class*="bg-slate-900"]) svg {
+    color: #475569;
+  }
+
+  /* Inactive Filter Pills (e.g. Leads pipeline pills) */
+  button.bg-slate-950.text-slate-400,
+  button.bg-slate-950[class*="border-slate-800"] {
+    background-color: #ffffff !important;
+    border-color: #cbd5e1 !important;
+    color: #334155 !important;
+  }
+
+  button.bg-slate-950.text-slate-400:hover,
+  button.bg-slate-950[class*="border-slate-800"]:hover {
+    background-color: #f1f5f9 !important;
+    border-color: #94a3b8 !important;
+    color: #0f172a !important;
+  }
+
+  button.bg-slate-950 span.bg-slate-800 {
+    background-color: #e2e8f0 !important;
+    color: #1e293b !important;
+  }
+
+  /* C. Colored Action Buttons - Ensure crisp white text & icons */
+  button.bg-cyan-600,
+  button.bg-cyan-500,
+  button.bg-blue-600,
+  button.bg-emerald-600,
+  button.bg-rose-600,
+  button.bg-purple-600,
+  button.bg-indigo-600 {
+    color: #ffffff !important;
+  }
+  button.bg-cyan-600 *,
+  button.bg-cyan-500 *,
+  button.bg-blue-600 *,
+  button.bg-emerald-600 *,
+  button.bg-rose-600 *,
+  button.bg-purple-600 *,
+  button.bg-indigo-600 * {
+    color: #ffffff !important;
+  }
+
+  button.bg-amber-500 {
+    background-color: #f59e0b !important;
+    color: #0f172a !important;
+  }
+  button.bg-amber-500 * {
+    color: #0f172a !important;
+  }
+
+  /* 8. FORM INPUTS, SELECTS, AND TEXTAREAS */
+  body:not(:has(.horuscope-auth-page)) :is(input:not([type="checkbox"]):not([type="radio"]), select, textarea),
+  .app-workspace :is(input:not([type="checkbox"]):not([type="radio"]), select, textarea) {
+    background-color: #ffffff !important;
+    border-color: #cbd5e1 !important;
+    color: #0f172a !important;
+  }
+
+  body:not(:has(.horuscope-auth-page)) :is(input:not([type="checkbox"]):not([type="radio"]):focus, select:focus, textarea:focus),
+  .app-workspace :is(input:not([type="checkbox"]):not([type="radio"]):focus, select:focus, textarea:focus) {
+    border-color: #0284c7 !important;
+    box-shadow: 0 0 0 2px rgba(2, 132, 199, 0.2) !important;
+    outline: none !important;
+  }
+
+  body:not(:has(.horuscope-auth-page)) :is(input::placeholder, textarea::placeholder),
+  .app-workspace :is(input::placeholder, textarea::placeholder) {
+    color: #64748b !important;
+  }
+
+  /* 9. SEMANTIC BADGES, STATUS PILLS & BANNERS */
+  /* Emerald / Success */
+  .bg-emerald-950,
+  .bg-emerald-950\/90,
+  .bg-emerald-950\/80,
+  .bg-emerald-950\/70,
+  .bg-emerald-950\/60,
+  .bg-emerald-950\/50,
+  .bg-emerald-950\/40,
+  .bg-emerald-950\/30,
+  .bg-emerald-950\/20,
+  .bg-emerald-950\/10 {
+    background-color: #ecfdf5 !important;
+    border-color: #a7f3d0 !important;
+    color: #065f46 !important;
+  }
+
+  /* Cyan / Discovery */
+  .bg-cyan-950,
+  .bg-cyan-950\/90,
+  .bg-cyan-950\/80,
+  .bg-cyan-950\/70,
+  .bg-cyan-950\/60,
+  .bg-cyan-950\/50,
+  .bg-cyan-950\/40,
+  .bg-cyan-950\/30,
+  .bg-cyan-950\/20,
+  .bg-cyan-950\/10 {
+    background-color: #ecfeff !important;
+    border-color: #a5f3fc !important;
+    color: #155e75 !important;
+  }
+
+  /* Sky / General Info */
+  .bg-sky-950,
+  .bg-sky-950\/90,
+  .bg-sky-950\/80,
+  .bg-sky-950\/70,
+  .bg-sky-950\/60,
+  .bg-sky-950\/50,
+  .bg-sky-950\/40,
+  .bg-sky-950\/30,
+  .bg-sky-950\/20,
+  .bg-sky-950\/10 {
+    background-color: #f0f9ff !important;
+    border-color: #bae6fd !important;
+    color: #0369a1 !important;
+  }
+
+  /* Amber / Attention & Warning */
+  .bg-amber-950,
+  .bg-amber-950\/90,
+  .bg-amber-950\/80,
+  .bg-amber-950\/70,
+  .bg-amber-950\/60,
+  .bg-amber-950\/50,
+  .bg-amber-950\/40,
+  .bg-amber-950\/30,
+  .bg-amber-950\/20,
+  .bg-amber-950\/10 {
+    background-color: #fffbeb !important;
+    border-color: #fde68a !important;
+    color: #92400e !important;
+  }
+
+  /* Rose & Red / Destructive & High Urgency */
+  .bg-rose-950,
+  .bg-rose-950\/90,
+  .bg-rose-950\/80,
+  .bg-rose-950\/70,
+  .bg-rose-950\/60,
+  .bg-rose-950\/50,
+  .bg-rose-950\/40,
+  .bg-rose-950\/30,
+  .bg-rose-950\/20,
+  .bg-rose-950\/10,
+  .bg-red-950,
+  .bg-red-950\/90,
+  .bg-red-950\/80,
+  .bg-red-950\/70,
+  .bg-red-950\/60,
+  .bg-red-950\/50,
+  .bg-red-950\/40,
+  .bg-red-950\/30,
+  .bg-red-950\/20,
+  .bg-red-950\/10 {
+    background-color: #fff1f2 !important;
+    border-color: #fecdd3 !important;
+    color: #9f1239 !important;
+  }
+
+  /* Purple & Violet / AI Intelligence */
+  .bg-purple-950,
+  .bg-purple-950\/90,
+  .bg-purple-950\/80,
+  .bg-purple-950\/70,
+  .bg-purple-950\/60,
+  .bg-purple-950\/50,
+  .bg-purple-950\/40,
+  .bg-purple-950\/30,
+  .bg-purple-950\/20,
+  .bg-purple-950\/10,
+  .bg-violet-950,
+  .bg-violet-950\/90,
+  .bg-violet-950\/80,
+  .bg-violet-950\/70,
+  .bg-violet-950\/60,
+  .bg-violet-950\/50,
+  .bg-violet-950\/40,
+  .bg-violet-950\/30,
+  .bg-violet-950\/20,
+  .bg-violet-950\/10 {
+    background-color: #faf5ff !important;
+    border-color: #e9d5ff !important;
+    color: #6b21a8 !important;
+  }
+
+  /* Indigo / Pipeline Opportunities */
+  .bg-indigo-950,
+  .bg-indigo-950\/90,
+  .bg-indigo-950\/80,
+  .bg-indigo-950\/70,
+  .bg-indigo-950\/60,
+  .bg-indigo-950\/50,
+  .bg-indigo-950\/40,
+  .bg-indigo-950\/30,
+  .bg-indigo-950\/20,
+  .bg-indigo-950\/10 {
+    background-color: #eef2ff !important;
+    border-color: #c7d2fe !important;
+    color: #3730a3 !important;
+  }
+
+  /* Neutral Slate Badges */
+  span.bg-slate-800,
+  span.bg-slate-900,
+  span.bg-slate-950 {
+    background-color: #f1f5f9 !important;
+    border-color: #cbd5e1 !important;
+    color: #1e293b !important;
+  }
+
+  /* 10. TABLES */
+  table {
+    color: #0f172a !important;
+  }
+
+  thead tr {
+    background-color: #f8fafc !important;
+    border-color: #e2e8f0 !important;
+  }
+
+  th {
+    color: #334155 !important;
+    font-weight: 600 !important;
+  }
+
+  tbody tr {
+    border-color: #f1f5f9 !important;
+  }
+
+  tbody tr:hover {
+    background-color: #f8fafc !important;
+  }
+
+  /* 11. NAVIGATION SIDEBAR */
+  nav {
+    background-color: #ffffff !important;
+    border-color: #e2e8f0 !important;
+  }
+
+  /* 12. SCROLLBARS */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 9999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #94a3b8;
+  }
+}
+
+/* ==========================================================================
+   HORUSCOPE AUTHENTICATION LANDING - LIGHT MODE IDENTITY & CONTRAST
+   High-specificity rules to guarantee 100% legibility and cohesive light theme
+   ========================================================================== */
+.horuscope-auth-page {
+  background-color: #F8FAFC !important;
+  color: #0F172A !important;
+}
+
+.horuscope-auth-page main,
+.horuscope-auth-page .auth-main {
+  background-color: transparent !important;
+  color: #0F172A !important;
+}
+
+.horuscope-auth-page h1,
+.horuscope-auth-page h2,
+.horuscope-auth-page h3,
+.horuscope-auth-page h4 {
+  color: #0F172A !important;
+}
+
+.horuscope-auth-page p {
+  color: #475569 !important;
+}
+
+.horuscope-auth-page label {
+  color: #334155 !important;
+  font-weight: 600 !important;
+}
+
+.horuscope-auth-page input:not([type="checkbox"]):not([type="radio"]),
+.horuscope-auth-page select,
+.horuscope-auth-page textarea {
+  background-color: #FFFFFF !important;
+  border: 1px solid #CBD5E1 !important;
+  color: #0F172A !important;
+  font-size: 14px !important;
+}
+
+.horuscope-auth-page input:not([type="checkbox"]):not([type="radio"]):focus,
+.horuscope-auth-page select:focus,
+.horuscope-auth-page textarea:focus {
+  border-color: #B48C36 !important;
+  box-shadow: 0 0 0 2px rgba(180, 140, 54, 0.2) !important;
+  outline: none !important;
+}
+
+.horuscope-auth-page input::placeholder,
+.horuscope-auth-page textarea::placeholder {
+  color: #94A3B8 !important;
+  opacity: 1 !important;
+}
+
+.horuscope-auth-page input[type="checkbox"] {
+  accent-color: #B48C36 !important;
+}
+
+.horuscope-auth-page .auth-card {
+  background-color: #FFFFFF !important;
+  border: 1px solid #E2E8F0 !important;
+  box-shadow: 0 10px 25px -5px rgba(15, 23, 42, 0.08) !important;
+}
+
+.horuscope-auth-page .auth-submit-btn {
+  background-color: #B48C36 !important;
+  color: #FFFFFF !important;
+  font-weight: 700 !important;
+  transition: all 0.15s ease-in-out !important;
+}
+
+.horuscope-auth-page .auth-submit-btn:hover:not(:disabled) {
+  background-color: #9B762A !important;
+  color: #FFFFFF !important;
+  box-shadow: 0 4px 14px rgba(180, 140, 54, 0.25) !important;
+}
+
+.horuscope-auth-page .auth-submit-btn:disabled {
+  background-color: #F1F5F9 !important;
+  color: #94A3B8 !important;
+  border-color: #E2E8F0 !important;
+}
+

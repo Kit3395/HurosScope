@@ -1,0 +1,6 @@
+{
+  "name": "HoruScope",
+  "description": "Personal business intelligence and prospecting workspace to discover businesses, analyze digital presence, identify opportunities, and organize potential clients in one focused workspace.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

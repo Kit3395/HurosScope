@@ -1,0 +1,1 @@
+sed -i '/public getOutreachActivitiesForLead/i \  public getAllOutreachActivities(): OutreachActivity[] {\n    return Array.from(this.outreachActivities.values()).filter(o => !o.isDeleted);\n  }\n' src/database/index.ts
