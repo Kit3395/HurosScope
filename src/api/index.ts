@@ -9,6 +9,7 @@
  */
 
 import { executeWithRetryProtection } from '../security';
+import { apiFetch } from '../services/api';
 import { SystemHealth } from '../types';
 
 interface CachedEntry<T> {
@@ -33,7 +34,7 @@ export const apiClient = {
     }
 
     return executeWithRetryProtection('getSystemHealth', async () => {
-      const response = await fetch('/api/system/health');
+      const response = await apiFetch('/api/system/health');
       if (!response.ok) {
         throw new Error(`Failed to fetch system health: HTTP ${response.status}`);
       }

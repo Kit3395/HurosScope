@@ -12,12 +12,11 @@ import {
   generateSalt,
   verifyPassword,
   COMPROMISED_DEFAULT_HASH,
-  createSession,
-  getSession,
-  revokeSession,
-  revokeSessionsForUser,
-  requireAuth,
-  requireOwner,
+  createAuthMiddleware,
+  requestToken,
+  setSessionCookie,
+  clearSessionCookie,
+  sessionStore,
   AuthenticatedRequest,
 } from './server/auth.ts';
 
@@ -72,27 +71,61 @@ const app = express();
 
 app.use(express.json());
 
-// In-memory server-side rate limit counters
-const serverRateLimit = {
-  requestsThisMinute: 0,
-  minuteResetTimestamp: Date.now() + 60000,
-  maxAllowedPerMinute: 120,
-};
+// Auth middleware, wired to the live user store so demotions/deletions take
+// effect immediately (sessions revalidate the user on every request).
+const { requireAuth, requireOwner } = createAuthMiddleware((userId: string) =>
+  readUsers().find((u) => u.id === userId)
+);
 
-// Rate limiting middleware
+// Rate limiting: per-client buckets (keyed by session token when present,
+// else IP) plus a global backstop — one client can no longer starve the rest.
+interface RateBucket {
+  count: number;
+  resetAt: number;
+}
+const apiBuckets = new Map<string, RateBucket>();
+const API_PER_CLIENT_PER_MIN = 90;
+const API_GLOBAL_PER_MIN = 400;
+let apiGlobalCount = 0;
+let apiGlobalResetAt = Date.now() + 60000;
+
+function rateLimitKey(req: Request): string {
+  const h = req.headers.cookie || '';
+  const m = h.match(/(?:^|;\s*)horuscope_session=([^;]+)/);
+  if (m) return 'tok:' + m[1].slice(0, 16);
+  const auth = req.headers.authorization || '';
+  const bm = auth.match(/^Bearer\s+(.+)$/i);
+  if (bm) return 'tok:' + bm[1].slice(0, 16);
+  return 'ip:' + (req.ip || req.socket.remoteAddress || 'unknown');
+}
+
 app.use('/api', (req: Request, res: Response, next) => {
   const now = Date.now();
-  if (now > serverRateLimit.minuteResetTimestamp) {
-    serverRateLimit.requestsThisMinute = 0;
-    serverRateLimit.minuteResetTimestamp = now + 60000;
+  if (now > apiGlobalResetAt) {
+    apiGlobalCount = 0;
+    apiGlobalResetAt = now + 60000;
+    // prune stale per-client buckets
+    for (const [k, b] of apiBuckets) {
+      if (now > b.resetAt) apiBuckets.delete(k);
+    }
   }
+  apiGlobalCount++;
 
-  serverRateLimit.requestsThisMinute++;
-  if (serverRateLimit.requestsThisMinute > serverRateLimit.maxAllowedPerMinute) {
+  const key = rateLimitKey(req);
+  let bucket = apiBuckets.get(key);
+  if (!bucket || now > bucket.resetAt) {
+    bucket = { count: 0, resetAt: now + 60000 };
+    apiBuckets.set(key, bucket);
+  }
+  bucket.count++;
+
+  const overClient = bucket.count > API_PER_CLIENT_PER_MIN;
+  const overGlobal = apiGlobalCount > API_GLOBAL_PER_MIN;
+  if (overClient || overGlobal) {
     return res.status(429).json({
       error: 'Too Many Requests',
       message: 'Rate limit ceiling reached on HorusScope secure backend.',
-      retryAfterSeconds: Math.ceil((serverRateLimit.minuteResetTimestamp - now) / 1000),
+      retryAfterSeconds: Math.ceil((bucket.resetAt - now) / 1000),
     });
   }
 
@@ -151,7 +184,7 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
   }
 
   if (!user.isPasswordSet || !user.passwordHash || !user.passwordSalt) {
-    return fail('This account has no password configured. Contact an administrator.');
+    return fail('Invalid email or password.');
   }
 
   const ok = await verifyPassword(String(password), user.passwordSalt, user.passwordHash);
@@ -179,14 +212,14 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
   user.updatedAt = new Date().toISOString();
   persistData();
 
-  const session = createSession(user.id, user.email, user.role);
+  const session = await sessionStore.create(user.id, user.email, user.role);
+  setSessionCookie(res, session.token);
   return res.json({ success: true, token: session.token, user: toSafeUser(user) });
 });
 
-app.post('/api/auth/logout', (req: Request, res: Response) => {
-  const header = req.headers.authorization || '';
-  const match = header.match(/^Bearer\s+(.+)$/i);
-  revokeSession(match ? match[1].trim() : null);
+app.post('/api/auth/logout', async (req: Request, res: Response) => {
+  await sessionStore.revoke(requestToken(req));
+  clearSessionCookie(res);
   res.json({ success: true });
 });
 
@@ -220,6 +253,25 @@ app.post('/api/auth/google', async (req: Request, res: Response) => {
     return res.status(401).json({ error: 'INVALID_CREDENTIALS', message: 'Google email not verified.' });
   }
 
+  // Token-substitution defense: when GOOGLE_CLIENT_ID is configured, verify
+  // the access token was minted for this app (not another OAuth client).
+  const expectedClientId = process.env.GOOGLE_CLIENT_ID;
+  if (expectedClientId) {
+    try {
+      const tiRes = await fetch(
+        `https://oauth2.googleapis.com/tokeninfo?access_token=${encodeURIComponent(googleAccessToken)}`
+      );
+      const ti = (await tiRes.json()) as { aud?: string };
+      if (!tiRes.ok || ti.aud !== expectedClientId) {
+        return res.status(401).json({ error: 'INVALID_CREDENTIALS', message: 'Google token was not issued for this app.' });
+      }
+    } catch {
+      return res.status(502).json({ error: 'GOOGLE_UNREACHABLE', message: 'Could not verify Google token audience.' });
+    }
+  } else {
+    console.warn('[AUTH] GOOGLE_CLIENT_ID not set — Google token audience check skipped.');
+  }
+
   const users = readUsers();
   const user = users.find(
     (u) =>
@@ -242,7 +294,8 @@ app.post('/api/auth/google', async (req: Request, res: Response) => {
   user.lockoutUntil = null;
   persistData();
 
-  const session = createSession(user.id, user.email, user.role);
+  const session = await sessionStore.create(user.id, user.email, user.role);
+  setSessionCookie(res, session.token);
   const safe = toSafeUser(user);
   return res.json({
     success: true,
@@ -252,11 +305,31 @@ app.post('/api/auth/google', async (req: Request, res: Response) => {
 });
 
 // Submit access request — PUBLIC by design (pre-auth onboarding).
+// Per-IP throttle for the public access-request endpoint (anti-spam).
+const accessRequestThrottle = new Map<string, number[]>();
+function accessRequestAllowed(ip: string): boolean {
+  const now = Date.now();
+  const windowMs = 60 * 60 * 1000;
+  const hits = (accessRequestThrottle.get(ip) || []).filter((t) => now - t < windowMs);
+  if (hits.length >= 5) return false;
+  hits.push(now);
+  accessRequestThrottle.set(ip, hits);
+  return true;
+}
+
 // 2. POST submit new access request
 app.post('/api/access-requests', (req: Request, res: Response) => {
+  const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
+  if (!accessRequestAllowed(clientIp)) {
+    return res.status(429).json({ error: 'Too Many Requests', message: 'Too many access requests from this address. Try again later.' });
+  }
   const { email, fullName, organization, requestedRole, reason } = req.body || {};
   if (!email || !fullName) {
     return res.status(400).json({ error: 'Email and Full Name are required.' });
+  }
+  const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRe.test(String(email).trim())) {
+    return res.status(400).json({ error: 'A valid email address is required.' });
   }
 
   const cleanEmail = String(email).trim().toLowerCase();
@@ -308,25 +381,26 @@ app.get('/api/auth/me', (req: AuthenticatedRequest, res: Response) => {
 });
 
 // OWNER-only session impersonation (replaces the old client-side perspective switch).
-app.post('/api/auth/impersonate', requireOwner, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/auth/impersonate', requireOwner, async (req: AuthenticatedRequest, res: Response) => {
   const { userId } = req.body || {};
   const target = readUsers().find((u) => u.id === String(userId || ''));
   if (!target || target.status !== 'APPROVED') {
     return res.status(404).json({ error: 'NOT_FOUND', message: 'Target user not found or not approved.' });
   }
-  const session = createSession(target.id, target.email, target.role);
+  const session = await sessionStore.create(target.id, target.email, target.role);
+  setSessionCookie(res, session.token);
   res.json({ success: true, token: session.token, user: toSafeUser(target) });
 });
 
 // Change own password (verifies current password server-side).
-app.post('/api/auth/change-password', (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/auth/change-password', async (req: AuthenticatedRequest, res: Response) => {
   const { currentPassword, newPassword } = req.body || {};
   const user = readUsers().find((u) => u.id === req.session!.userId);
   if (!user) return res.status(404).json({ error: 'NOT_FOUND', message: 'User not found.' });
   if (!currentPassword || !newPassword || String(newPassword).length < 8) {
     return res.status(400).json({ error: 'INVALID_REQUEST', message: 'Current password and a new password (min 8 chars) are required.' });
   }
-  return (async () => {
+  try {
     const ok = await verifyPassword(String(currentPassword), user.passwordSalt || '', user.passwordHash || '');
     if (!ok) return res.status(401).json({ error: 'INVALID_CREDENTIALS', message: 'Current password is incorrect.' });
     user.passwordSalt = generateSalt();
@@ -334,10 +408,14 @@ app.post('/api/auth/change-password', (req: AuthenticatedRequest, res: Response)
     user.isPasswordSet = true;
     user.updatedAt = new Date().toISOString();
     persistData();
-    revokeSessionsForUser(user.id);
-    const session = createSession(user.id, user.email, user.role);
+    await sessionStore.revokeForUser(user.id);
+    const session = await sessionStore.create(user.id, user.email, user.role);
+    setSessionCookie(res, session.token);
     res.json({ success: true, token: session.token, user: toSafeUser(user) });
-  })();
+  } catch (err) {
+    console.error('[AUTH] change-password failed:', (err as Error)?.message || err);
+    res.status(500).json({ error: 'SERVER_ERROR', message: 'Password change failed.' });
+  }
 });
 
 // 2. System Health detailed status
@@ -356,7 +434,7 @@ app.get('/api/system/health', (req: Request, res: Response) => {
     lastSynchronization: new Date().toISOString(),
     errorCount: 0,
     activeRateLimits: {
-      googlePlacesBudgetRemaining: Math.max(0, 30 - discoveryRateLimit.requestsThisMinute),
+      googlePlacesBudgetRemaining: DISCOVERY_PER_CLIENT_PER_MIN,
       aiTokenBudgetRemaining: 15,
       webAuditQueueSize: 0,
     },
@@ -370,116 +448,75 @@ app.get('/api/system/health', (req: Request, res: Response) => {
   });
 });
 
-// 2b. Supabase Backend Health and Connectivity
-app.get('/api/supabase/status', async (req: Request, res: Response) => {
-  const url =
-    process.env.SUPABASE_URL ||
-    process.env.VITE_SUPABASE_URL ||
-    '';
-  const hasPublishableKey = Boolean(
-    process.env.SUPABASE_PUBLISHABLE_KEY ||
-      process.env.VITE_SUPABASE_ANON_KEY ||
-      process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
-  );
-  const hasSecretKey = Boolean(
-    process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY
-  );
-  const jwksUrl =
-    process.env.SUPABASE_JWKS_URL ||
-    `${url}/auth/v1/.well-known/jwks.json`;
-
-  let pingSuccess = false;
-  try {
-    const admin = getSupabaseAdminClient();
-    if (admin) {
-      // Test basic connection
-      const { error } = await admin.from('businesses').select('id').limit(1);
-      pingSuccess = !error || error.code === 'PGRST116' || error.message.includes('permission');
-    } else {
-      pingSuccess = true;
-    }
-  } catch {
-    pingSuccess = false;
-  }
-
-  res.json({
-    status: 'ONLINE',
-    url,
-    jwksUrl,
-    hasPublishableKey,
-    hasSecretKey,
-    serviceRoleActive: hasSecretKey,
-    pingSuccess,
-    timestamp: new Date().toISOString(),
-  });
-});
-
-// 3. System Locks & Feature Flags (Phase 3 Discovery Active)
-app.get('/api/system/locks', (req: Request, res: Response) => {
-  res.json({
-    ENABLE_GOOGLE_MAPS_DISCOVERY: true,
-    ENABLE_HTML_MAPS_SCRAPING: false, // Permanently Forbidden
-    ENABLE_BULK_SCRAPING: false,      // Permanently Forbidden
-    ENABLE_AUTOMATED_OUTREACH: false,
-    ENABLE_CONTACT_HARVESTING: false,
-    ENABLE_PAYMENT_PROCESSING: false,
-    ALLOW_SILENT_OVERWRITE: false,
-    ENABLE_SOFT_DELETION: true,
-    ENFORCE_RATE_LIMITING: true,
-  });
-});
-
-// 4. Rate limits info
-app.get('/api/system/rate-limits', (req: Request, res: Response) => {
-  const now = Date.now();
-  res.json({
-    currentMinuteRequests: serverRateLimit.requestsThisMinute,
-    remainingInWindow: Math.max(0, serverRateLimit.maxAllowedPerMinute - serverRateLimit.requestsThisMinute),
-    windowResetSeconds: Math.max(0, Math.ceil((serverRateLimit.minuteResetTimestamp - now) / 1000)),
-  });
-});
-
 // ============================================================================
 // PHASE 3: BUSINESS DISCOVERY ENDPOINTS (Official Google Places API New)
 // ============================================================================
 
-interface DiscoveryRateLimitState {
-  requestsThisMinute: number;
-  minuteResetTimestamp: number;
-  maxPerMinute: number;
-  sessionTotalRequests: number;
-  lastRequestTime: number;
+const DISCOVERY_PER_CLIENT_PER_MIN = 30;
+const discoveryBuckets = new Map<string, RateBucket>();
+let discoveryTotalRequests = 0;
+
+function discoveryBucket(key: string): { bucket: RateBucket; limited: boolean } {
+  const now = Date.now();
+  let bucket = discoveryBuckets.get(key);
+  if (!bucket || now > bucket.resetAt) {
+    bucket = { count: 0, resetAt: now + 60000 };
+    discoveryBuckets.set(key, bucket);
+  }
+  // prune occasionally
+  if (discoveryBuckets.size > 500) {
+    for (const [k, b] of discoveryBuckets) {
+      if (now > b.resetAt) discoveryBuckets.delete(k);
+    }
+  }
+  bucket.count++;
+  discoveryTotalRequests++;
+  return { bucket, limited: bucket.count > DISCOVERY_PER_CLIENT_PER_MIN };
 }
 
-const discoveryRateLimit: DiscoveryRateLimitState = {
-  requestsThisMinute: 0,
-  minuteResetTimestamp: Date.now() + 60000,
-  maxPerMinute: 30,
-  sessionTotalRequests: 0,
-  lastRequestTime: 0,
-};
-
 // 5. Discovery API Status & Quota Health
-app.get('/api/discovery/status', (req: Request, res: Response) => {
+app.get('/api/discovery/status', (req: AuthenticatedRequest, res: Response) => {
   const now = Date.now();
-  if (now > discoveryRateLimit.minuteResetTimestamp) {
-    discoveryRateLimit.requestsThisMinute = 0;
-    discoveryRateLimit.minuteResetTimestamp = now + 60000;
-  }
+  const key = rateLimitKey(req);
+  const bucket = discoveryBuckets.get(key);
+  const used = bucket && now <= bucket.resetAt ? bucket.count : 0;
 
   const hasApiKey = Boolean(process.env.GOOGLE_MAPS_API_KEY && process.env.GOOGLE_MAPS_API_KEY.trim().length > 5);
 
   res.json({
     hasApiKey,
     placesApiVersion: 'Google Places API (New) - v1/places:searchText',
-    requestsThisMinute: discoveryRateLimit.requestsThisMinute,
-    remainingThisMinute: Math.max(0, discoveryRateLimit.maxPerMinute - discoveryRateLimit.requestsThisMinute),
-    minuteResetSeconds: Math.max(0, Math.ceil((discoveryRateLimit.minuteResetTimestamp - now) / 1000)),
-    sessionRequestsCount: discoveryRateLimit.sessionTotalRequests,
+    requestsThisMinute: used,
+    remainingThisMinute: Math.max(0, DISCOVERY_PER_CLIENT_PER_MIN - used),
+    minuteResetSeconds: bucket ? Math.max(0, Math.ceil((bucket.resetAt - now) / 1000)) : 60,
+    sessionRequestsCount: discoveryTotalRequests,
     isDiagnosticsModeAvailable: true,
     throttlingDelayMs: 600,
     attributionNotice: 'Powered by Google Maps Platform (Places API New)',
     solutionId: 'gmp_mcp_codeassist_v1_aistudio',
+  });
+});
+
+// CRM business registry (server-side): populated by live Places discovery.
+// Any authenticated role can read; the registry is the backing store for the
+// `crm_read_businesses` MCP tool.
+app.get('/api/crm/businesses', (req: AuthenticatedRequest, res: Response) => {
+  const query = String(req.query.q || '').toLowerCase().trim();
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+  let records = businessesCache;
+  if (query) {
+    records = records.filter(
+      (b) =>
+        b.name.toLowerCase().includes(query) ||
+        (b.formattedAddress || '').toLowerCase().includes(query) ||
+        (b.primaryType || '').toLowerCase().includes(query)
+    );
+  }
+  const sorted = [...records].sort((a, b) => (a.lastSeenAt < b.lastSeenAt ? 1 : -1));
+  res.json({
+    businesses: sorted.slice(0, limit),
+    total: records.length,
+    registrySize: businessesCache.length,
   });
 });
 
@@ -708,13 +745,109 @@ function generateSandboxPlaces(location: string, category: string, keyword: stri
 
 const DATA_DIR = path.join(process.cwd(), '.data');
 
+// Geocode cache: location string -> {lat, lng, expiresAt}
+const geocodeCache = new Map<string, { lat: number; lng: number; expiresAt: number }>();
+
+async function geocodeLocation(
+  location: string,
+  apiKey: string
+): Promise<{ lat: number; lng: number } | null> {
+  const key = location.toLowerCase().trim();
+  const cached = geocodeCache.get(key);
+  if (cached && Date.now() < cached.expiresAt) {
+    return { lat: cached.lat, lng: cached.lng };
+  }
+  try {
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(location)}&key=${encodeURIComponent(apiKey)}`;
+    const res = await fetch(url);
+    const data = (await res.json()) as any;
+    const loc = data?.results?.[0]?.geometry?.location;
+    if (typeof loc?.lat === 'number' && typeof loc?.lng === 'number') {
+      geocodeCache.set(key, { lat: loc.lat, lng: loc.lng, expiresAt: Date.now() + 24 * 3600 * 1000 });
+      // prune occasionally
+      if (geocodeCache.size > 200) {
+        const first = geocodeCache.keys().next().value;
+        if (first) geocodeCache.delete(first);
+      }
+      return { lat: loc.lat, lng: loc.lng };
+    }
+  } catch (err) {
+    console.warn('[DISCOVERY] Geocode lookup failed:', (err as Error)?.message || err);
+  }
+  return null;
+}
+
+const MAX_BUSINESS_REGISTRY = 2000;
+
+/**
+ * Upsert live (non-sandbox) discovered places into the server-side business
+ * registry so `crm_read_businesses` and GET /api/crm/businesses return real
+ * data instead of an empty list.
+ */
+function upsertDiscoveredBusinesses(places: any[]): void {
+  if (!Array.isArray(places) || places.length === 0) return;
+  const now = new Date().toISOString();
+  let changed = false;
+  for (const p of places) {
+    if (!p || typeof p !== 'object') continue;
+    const name = String(p.name || '').trim();
+    if (!name) continue;
+    const existing = businessesCache.find(
+      (b) =>
+        (b.googlePlaceId && p.googlePlaceId && b.googlePlaceId === p.googlePlaceId) ||
+        (!b.googlePlaceId && !p.googlePlaceId &&
+          b.name.toLowerCase() === name.toLowerCase() &&
+          (b.formattedAddress || '').toLowerCase() === String(p.formattedAddress || '').toLowerCase())
+    );
+    if (existing) {
+      existing.rating = typeof p.rating === 'number' ? p.rating : existing.rating;
+      existing.reviewCount = typeof p.reviewCount === 'number' ? p.reviewCount : existing.reviewCount;
+      existing.opportunityScore = typeof p.opportunityScore === 'number' ? p.opportunityScore : existing.opportunityScore;
+      existing.opportunityGrade = p.opportunityGrade || existing.opportunityGrade;
+      existing.websiteStatus = p.websiteStatus || existing.websiteStatus;
+      existing.lastSeenAt = now;
+      changed = true;
+    } else {
+      businessesCache.push({
+        id: `biz_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+        googlePlaceId: p.googlePlaceId,
+        name,
+        formattedAddress: p.formattedAddress,
+        phone: p.phone,
+        website: p.website,
+        rating: p.rating,
+        reviewCount: p.reviewCount,
+        primaryType: p.primaryType,
+        businessStatus: p.businessStatus,
+        websiteStatus: p.websiteStatus,
+        opportunityScore: p.opportunityScore,
+        opportunityGrade: p.opportunityGrade,
+        googleMapsUri: p.googleMapsUri,
+        source: 'PLACES_DISCOVERY',
+        discoveredAt: now,
+        lastSeenAt: now,
+      });
+      changed = true;
+    }
+  }
+  // Bound the registry: drop oldest lastSeen first.
+  if (businessesCache.length > MAX_BUSINESS_REGISTRY) {
+    businessesCache.sort((a, b) => (a.lastSeenAt < b.lastSeenAt ? -1 : 1));
+    businessesCache = businessesCache.slice(businessesCache.length - MAX_BUSINESS_REGISTRY);
+    changed = true;
+  }
+  if (changed) persistData();
+}
+
 async function mcpExecutePlacesDiscover(args: Record<string, unknown>, context?: any) {
   const startTime = Date.now();
-  const location = String(args.location || 'Cebu City');
-  const category = String(args.category || 'Restaurants');
-  const keyword = String(args.keyword || '');
-  const pageSize = Number(args.pageSize) || 10;
-  const pageToken = args.pageToken ? String(args.pageToken) : undefined;
+  const cap = (v: unknown, n: number): string => String(v || '').slice(0, n);
+  const location = cap(args.location || 'Cebu City', 200);
+  const category = cap(args.category || 'Restaurants', 120);
+  const keyword = cap(args.keyword || '', 200);
+  const pageSize = Math.min(50, Math.max(1, Number(args.pageSize) || 10));
+  const pageToken = args.pageToken ? cap(args.pageToken, 500) : undefined;
+  const radiusKm = Math.min(50, Math.max(1, Number(args.radiusKm) || 10));
   const forceSandbox = Boolean(args.forceSandbox);
   const apiKey = process.env.GOOGLE_MAPS_API_KEY?.trim();
 
@@ -745,6 +878,20 @@ async function mcpExecutePlacesDiscover(args: Record<string, unknown>, context?:
       textQuery,
       pageSize: Math.min(pageSize || 10, 20),
     };
+
+    // radiusKm is honored via a locationBias circle once the location string
+    // is geocoded. If geocoding fails we proceed without bias (noted below).
+    let radiusApplied = false;
+    const center = await geocodeLocation(location, apiKey);
+    if (center) {
+      requestBody.locationBias = {
+        circle: {
+          center: { latitude: center.lat, longitude: center.lng },
+          radius: radiusKm * 1000,
+        },
+      };
+      radiusApplied = true;
+    }
 
     if (pageToken) {
       requestBody.pageToken = pageToken;
@@ -829,6 +976,12 @@ async function mcpExecutePlacesDiscover(args: Record<string, unknown>, context?:
       };
     });
 
+    try {
+      upsertDiscoveredBusinesses(formattedPlaces);
+    } catch (err) {
+      console.warn('[DISCOVERY] Business registry upsert failed:', (err as Error)?.message || err);
+    }
+
     return {
       places: formattedPlaces,
       nextPageToken: data.nextPageToken,
@@ -836,6 +989,8 @@ async function mcpExecutePlacesDiscover(args: Record<string, unknown>, context?:
       source: 'OFFICIAL_GOOGLE_PLACES_API_NEW',
       isSandboxData: false,
       attribution: 'Powered by Google Maps Platform',
+      radiusKm,
+      radiusBiasApplied: radiusApplied,
       sessionMeta: {
         queryText: textQuery,
         timestamp: new Date().toISOString(),
@@ -867,10 +1022,11 @@ async function mcpExecutePlacesDiscover(args: Record<string, unknown>, context?:
 }
 
 async function mcpExecuteWebsiteAudit(args: Record<string, unknown>, context?: any) {
+  const cap = (v: unknown, n: number): string => String(v || '').slice(0, n);
   const businessId = args.businessId ? String(args.businessId) : undefined;
-  const businessName = String(args.businessName || 'Business');
-  const websiteUrl = args.websiteUrl ? String(args.websiteUrl) : '';
-  const category = args.category ? String(args.category) : 'local business';
+  const businessName = cap(args.businessName || 'Business', 200);
+  const websiteUrl = cap(args.websiteUrl || '', 300);
+  const category = cap(args.category || 'local business', 120);
   const rating = Number(args.rating) || 0;
   const reviewCount = Number(args.reviewCount) || 0;
 
@@ -1103,29 +1259,26 @@ async function mcpExecuteCrmRead(args: Record<string, unknown>) {
   const query = args.query ? String(args.query).toLowerCase().trim() : '';
   const limit = Math.min(50, Math.max(1, Number(args.limit) || 20));
 
-  const businessesFilePath = path.join(DATA_DIR, 'businesses.json');
-  let records: any[] = [];
-  if (fs.existsSync(businessesFilePath)) {
-    try {
-      records = JSON.parse(fs.readFileSync(businessesFilePath, 'utf-8'));
-    } catch {
-      records = [];
-    }
-  }
+  let records: StoredBusiness[] = businessesCache;
 
   if (query) {
-    records = records.filter((b: any) =>
-      b.name?.toLowerCase().includes(query) ||
-      b.address?.toLowerCase().includes(query) ||
-      b.category?.toLowerCase().includes(query)
+    records = records.filter(
+      (b) =>
+        b.name.toLowerCase().includes(query) ||
+        (b.formattedAddress || '').toLowerCase().includes(query) ||
+        (b.primaryType || '').toLowerCase().includes(query)
     );
   }
 
+  // Most recently seen first.
+  const sorted = [...records].sort((a, b) => (a.lastSeenAt < b.lastSeenAt ? 1 : -1));
+
   return {
-    businesses: records.slice(0, limit),
+    businesses: sorted.slice(0, limit),
     totalMatching: records.length,
     returnedCount: Math.min(records.length, limit),
-    source: 'ENTERPRISE_VAULT',
+    source: 'SERVER_BUSINESS_REGISTRY',
+    registrySize: businessesCache.length,
     timestamp: new Date().toISOString(),
   };
 }
@@ -1134,6 +1287,19 @@ async function mcpExecuteCrmRead(args: Record<string, unknown>) {
 mcpHandler.registerExecutor('places_discover', mcpExecutePlacesDiscover);
 mcpHandler.registerExecutor('intelligence_audit_website', mcpExecuteWebsiteAudit);
 mcpHandler.registerExecutor('crm_read_businesses', mcpExecuteCrmRead);
+// The access/requests resource serves the live queue (owner-visible via MCP).
+mcpHandler.setAccessRequestsProvider(() =>
+  requestsCache.map((r) => ({
+    id: r.id,
+    email: r.email,
+    fullName: r.fullName,
+    organization: r.organization,
+    requestedRole: r.requestedRole,
+    status: r.status,
+    submittedAt: r.submittedAt,
+    reviewedAt: r.reviewedAt,
+  }))
+);
 
 // ============================================================================
 // MODEL CONTEXT PROTOCOL (MCP) JSON-RPC 2.0 & GOVERNANCE ENDPOINTS
@@ -1142,8 +1308,8 @@ mcpHandler.registerExecutor('crm_read_businesses', mcpExecuteCrmRead);
 // Standard JSON-RPC 2.0 MCP Protocol Transport
 app.post('/api/mcp', async (req: Request, res: Response) => {
   const context = {
-    callerRole: (req.headers['x-user-role'] as any) || 'OPERATOR',
-    userId: (req.headers['x-user-id'] as any) || 'system',
+    callerRole: (req as AuthenticatedRequest).session!.role as 'OWNER' | 'ADMIN' | 'OPERATOR' | 'VIEWER',
+    userId: (req as AuthenticatedRequest).session!.userId,
     ip: req.ip,
     userAgent: req.headers['user-agent'],
   };
@@ -1152,46 +1318,24 @@ app.post('/api/mcp', async (req: Request, res: Response) => {
 });
 
 // REST endpoint to inspect all registered MCP tools & input schemas
-app.get('/api/mcp/tools', (req: Request, res: Response) => {
-  res.json({
-    tools: MCP_REGISTERED_TOOLS,
-    total: MCP_REGISTERED_TOOLS.length,
-    governance: 'ACTIVE',
-    protocolVersion: '2024-11-05',
-  });
-});
-
-// REST endpoint to directly invoke an MCP tool with pre-call governance
-app.post('/api/mcp/tools/:toolName', async (req: Request, res: Response) => {
-  const { toolName } = req.params;
-  const context = {
-    callerRole: (req.headers['x-user-role'] as any) || 'OPERATOR',
-    userId: (req.headers['x-user-id'] as any) || 'system',
-    ip: req.ip,
-    skipCache: req.query.skipCache === 'true',
-  };
-  const result = await mcpHandler.executeTool(toolName, req.body, context);
-  if (result.isError) {
-    return res.status(400).json(result);
-  }
-  res.json(result);
-});
-
-// REST endpoint to inspect registered MCP Resources
-app.get('/api/mcp/resources', (req: Request, res: Response) => {
-  res.json({
-    resources: MCP_REGISTERED_RESOURCES,
-    total: MCP_REGISTERED_RESOURCES.length,
-  });
-});
-
 // Real-time MCP Gateway telemetry & pre-call governance metrics
 app.get('/api/mcp/stats', (req: Request, res: Response) => {
   res.json(mcpGovernance.getMetrics());
 });
 
 // Server-Sent Events (SSE) stream for MCP real-time connections
-app.get('/api/mcp/sse', (req: Request, res: Response) => {
+// L5: cap concurrent SSE streams per user (slow resource exhaustion).
+const sseConnections = new Map<string, number>();
+const MAX_SSE_PER_USER = 3;
+
+app.get('/api/mcp/sse', (req: AuthenticatedRequest, res: Response) => {
+  const sseKey = req.session!.userId;
+  const current = sseConnections.get(sseKey) || 0;
+  if (current >= MAX_SSE_PER_USER) {
+    return res.status(429).json({ error: 'Too Many Requests', message: 'Too many open event streams.' });
+  }
+  sseConnections.set(sseKey, current + 1);
+
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
@@ -1211,6 +1355,9 @@ app.get('/api/mcp/sse', (req: Request, res: Response) => {
 
   req.on('close', () => {
     clearInterval(keepAliveInterval);
+    const left = (sseConnections.get(sseKey) || 1) - 1;
+    if (left <= 0) sseConnections.delete(sseKey);
+    else sseConnections.set(sseKey, left);
   });
 });
 
@@ -1218,64 +1365,22 @@ app.get('/api/mcp/sse', (req: Request, res: Response) => {
 // PHASE 3: BUSINESS DISCOVERY SEARCH (GOVERNED VIA MCP PRE-CALL HANDLER)
 // ============================================================================
 
-app.post('/api/discovery/search', async (req: Request, res: Response) => {
-  const now = Date.now();
-
-  // Enforce Discovery Rate Limiting
-  if (now > discoveryRateLimit.minuteResetTimestamp) {
-    discoveryRateLimit.requestsThisMinute = 0;
-    discoveryRateLimit.minuteResetTimestamp = now + 60000;
-  }
-
-  discoveryRateLimit.requestsThisMinute++;
-  discoveryRateLimit.sessionTotalRequests++;
-  discoveryRateLimit.lastRequestTime = now;
-
-  const { simulateError } = req.body;
-
-  // Handle explicit API simulation error flags for testing
-  if (simulateError === 'INVALID_KEY') {
-    return res.status(403).json({
-      error: 'INVALID_API_KEY',
-      status: 403,
-      message: 'The provided Google Maps Platform API key is invalid, lacks authorization, or Places API (New) has not been activated.',
-      remediation: 'Verify GOOGLE_MAPS_API_KEY in environment secrets and enable "Places API (New)" in Google Cloud Console.',
-      attribution: 'Powered by Google Maps Platform',
-    });
-  }
-
-  if (simulateError === 'RATE_LIMIT') {
+app.post('/api/discovery/search', async (req: AuthenticatedRequest, res: Response) => {
+  // Enforce per-client Discovery Rate Limiting (quota fairness)
+  const { bucket, limited } = discoveryBucket(rateLimitKey(req));
+  if (limited) {
     return res.status(429).json({
       error: 'RATE_LIMIT_EXCEEDED',
       status: 429,
-      message: 'Google Maps Platform discovery rate limit exceeded (30 requests/minute ceiling).',
-      retryAfterSeconds: Math.ceil((discoveryRateLimit.minuteResetTimestamp - now) / 1000),
-      remediation: 'Throttle discovery requests and utilize search pagination.',
-    });
-  }
-
-  if (simulateError === 'QUOTA_EXCEEDED') {
-    return res.status(429).json({
-      error: 'QUOTA_EXCEEDED',
-      status: 429,
-      message: 'Google Cloud project quota for Places API (New) has been exhausted for the billing cycle.',
-      remediation: 'Inspect your quotas at console.cloud.google.com/apis/api/places.googleapis.com/quotas',
-    });
-  }
-
-  if (simulateError === 'NETWORK') {
-    return res.status(503).json({
-      error: 'NETWORK_TIMEOUT',
-      status: 503,
-      message: 'Network connection to Google Places API gateway timed out.',
-      remediation: 'Verify container network connectivity and retry the search.',
+      message: 'Discovery rate limit exceeded (30 requests/minute per user).',
+      retryAfterSeconds: Math.max(0, Math.ceil((bucket.resetAt - Date.now()) / 1000)),
     });
   }
 
   // Pre-Call Governance Interception via MCP Handler
   const context = {
-    callerRole: (req.headers['x-user-role'] as any) || 'OPERATOR',
-    userId: (req.headers['x-user-id'] as any) || 'system',
+    callerRole: (req as AuthenticatedRequest).session!.role as 'OWNER' | 'ADMIN' | 'OPERATOR' | 'VIEWER',
+    userId: (req as AuthenticatedRequest).session!.userId,
     ip: req.ip,
   };
 
@@ -1300,8 +1405,8 @@ app.post('/api/discovery/search', async (req: Request, res: Response) => {
 
 app.post('/api/intelligence/audit-website', async (req: Request, res: Response) => {
   const context = {
-    callerRole: (req.headers['x-user-role'] as any) || 'OPERATOR',
-    userId: (req.headers['x-user-id'] as any) || 'system',
+    callerRole: (req as AuthenticatedRequest).session!.role as 'OWNER' | 'ADMIN' | 'OPERATOR' | 'VIEWER',
+    userId: (req as AuthenticatedRequest).session!.userId,
     ip: req.ip,
   };
 
@@ -1330,6 +1435,7 @@ app.post('/api/intelligence/audit-social', async (req: Request, res: Response) =
   if (!businessName) {
     return res.status(400).json({ error: 'businessName is required' });
   }
+
 
   const isNoWebsite = websiteStatus === 'NO_WEBSITE' || !websiteUrl || websiteUrl.toLowerCase().includes('none');
 
@@ -1474,6 +1580,15 @@ app.post('/api/intelligence/score-lead', async (req: Request, res: Response) => 
     return res.status(400).json({ error: 'businessName is required' });
   }
 
+  // L3: cap user-controlled fields (prompt-injection / quota-burn hardening).
+  const cap = (v: unknown, n: number): string => String(v || '').slice(0, n);
+  const safeName = cap(businessName, 200);
+  const safeCategory = cap(primaryCategory, 120);
+  const safeUrl = cap(websiteUrl, 300);
+  const safePhone = cap(phone, 60);
+  const safeAddress = cap(address, 300);
+  const safeChannels = Array.isArray(channels) ? channels.slice(0, 12) : [];
+
   const isNoWebsite = websiteStatus === 'NO_WEBSITE' || !websiteUrl || websiteUrl.toLowerCase().includes('none');
   const isOutdated = websiteStatus === 'POTENTIALLY_OUTDATED';
   const hasActiveSocial = channels.some(
@@ -1490,15 +1605,15 @@ app.post('/api/intelligence/score-lead', async (req: Request, res: Response) => 
 Evaluate this prospect across 5 distinct dimensions (0-100), compute an Overall Prospect Score (0-100), and write an insightful, grounded narrative explanation explaining why the business received these scores.
 
 BUSINESS DATA:
-- Name: ${businessName}
-- Primary Category: ${primaryCategory}
-- Official Website: ${websiteUrl || 'NONE (No official website)'}
+- Name: ${safeName}
+- Primary Category: ${safeCategory}
+- Official Website: ${safeUrl || 'NONE (No official website)'}
 - Website Status: ${websiteStatus || (isNoWebsite ? 'NO_WEBSITE' : 'WEBSITE_EXISTS')}
 - Google Rating: ${numericRating.toFixed(1)} / 5.0
 - Google Review Count: ${numericReviews} verified customer reviews
-- Operational Phone: ${phone || 'None provided'}
-- Physical Address: ${address || 'Verified local address'}
-- Social Presence: ${channels.map((c: any) => `${c.platform || c.platformDisplayName}: ${c.status || 'UNKNOWN'}`).join(', ') || 'Facebook & Instagram Active'}
+- Operational Phone: ${safePhone || 'None provided'}
+- Physical Address: ${safeAddress || 'Verified local address'}
+- Social Presence: ${safeChannels.map((c: any) => `${cap(c.platform || c.platformDisplayName, 60)}: ${cap(c.status, 30)}`).join(', ') || 'Facebook & Instagram Active'}
 
 SCORING CRITERIA (0 to 100 for each):
 1. Digital Opportunity: Overall gap in their digital ecosystem and market upside.
@@ -1816,11 +1931,34 @@ interface StoredUserAccount {
 interface DataSnapshot {
   users: StoredUserAccount[];
   accessRequests: StoredAccessRequest[];
+  businesses: StoredBusiness[];
+}
+
+/** Server-side registry of businesses discovered via Places (live results). */
+interface StoredBusiness {
+  id: string;
+  googlePlaceId?: string;
+  name: string;
+  formattedAddress?: string;
+  phone?: string;
+  website?: string;
+  rating?: number;
+  reviewCount?: number;
+  primaryType?: string;
+  businessStatus?: string;
+  websiteStatus?: string;
+  opportunityScore?: number;
+  opportunityGrade?: string;
+  googleMapsUri?: string;
+  source: string;
+  discoveredAt: string;
+  lastSeenAt: string;
 }
 
 let snapshotStore: SnapshotStore | null = null;
 let usersCache: StoredUserAccount[] = [];
 let requestsCache: StoredAccessRequest[] = [];
+let businessesCache: StoredBusiness[] = [];
 let dataStoreReady = false;
 
 function seedSnapshot(): DataSnapshot {
@@ -1851,12 +1989,13 @@ function seedSnapshot(): DataSnapshot {
       },
     ],
     accessRequests: [],
+    businesses: [],
   };
 }
 
 function persistData(): void {
   if (!snapshotStore) return;
-  const json = JSON.stringify({ users: usersCache, accessRequests: requestsCache });
+  const json = JSON.stringify({ users: usersCache, accessRequests: requestsCache, businesses: businessesCache });
   // SnapshotStore.save never throws — fire and forget is safe.
   void snapshotStore.save(json);
 }
@@ -1906,14 +2045,16 @@ async function initDataStore(): Promise<void> {
       const parsed = JSON.parse(raw) as DataSnapshot;
       usersCache = Array.isArray(parsed.users) ? parsed.users : [];
       requestsCache = Array.isArray(parsed.accessRequests) ? parsed.accessRequests : [];
+      businessesCache = Array.isArray(parsed.businesses) ? parsed.businesses : [];
       console.log(
-        `[STORAGE] Loaded snapshot: ${usersCache.length} users, ${requestsCache.length} access requests.`
+        `[STORAGE] Loaded snapshot: ${usersCache.length} users, ${requestsCache.length} access requests, ${businessesCache.length} businesses.`
       );
     } catch {
       console.warn('[STORAGE] Snapshot parse failed — reseeding.');
       const seed = seedSnapshot();
       usersCache = seed.users;
       requestsCache = seed.accessRequests;
+      businessesCache = seed.businesses || [];
     }
   } else {
     const seed = seedSnapshot();
@@ -1955,6 +2096,9 @@ function writeAccessRequests(requests: StoredAccessRequest[]): void {
   requestsCache = requests;
   persistData();
 }
+
+/** Allowed role values — arbitrary strings are rejected. */
+const VALID_ROLES = ['OWNER', 'ADMIN', 'OPERATOR', 'VIEWER'] as const;
 
 /** Strip credential material before a user record leaves the server. */
 function toSafeUser(u: StoredUserAccount): Omit<StoredUserAccount, 'passwordSalt' | 'passwordHash'> {
@@ -2085,13 +2229,18 @@ app.post('/api/users', requireOwner, (req: AuthenticatedRequest, res: Response) 
     return res.status(400).json({ error: 'A user account with this email already exists.' });
   }
 
+  const requestedRole = String(role || 'OPERATOR');
+  if (!(VALID_ROLES as readonly string[]).includes(requestedRole)) {
+    return res.status(400).json({ error: `Invalid role. Must be one of: ${VALID_ROLES.join(', ')}` });
+  }
+
   return (async () => {
     const salt = generateSalt();
     const newUser: StoredUserAccount = {
       id: `usr_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       email: cleanEmail,
       displayName: String(displayName).trim(),
-      role: role || 'OPERATOR',
+      role: requestedRole as typeof VALID_ROLES[number],
       status: status || 'APPROVED',
       organization: organization ? String(organization).trim() : undefined,
       passwordSalt: salt,
@@ -2123,6 +2272,10 @@ app.put('/api/users/:id', requireOwner, async (req: AuthenticatedRequest, res: R
     return res.status(404).json({ error: `User account "${id}" not found.` });
   }
 
+  if (updates.role !== undefined && !(VALID_ROLES as readonly string[]).includes(String(updates.role))) {
+    return res.status(400).json({ error: `Invalid role. Must be one of: ${VALID_ROLES.join(', ')}` });
+  }
+
   const user = users[index];
   if (user.role === 'OWNER' && updates.role && updates.role !== 'OWNER') {
     const otherOwners = users.filter((u) => u.id !== id && u.role === 'OWNER');
@@ -2147,16 +2300,20 @@ app.put('/api/users/:id', requireOwner, async (req: AuthenticatedRequest, res: R
     merged.isPasswordSet = true;
     merged.failedLoginAttempts = 0;
     merged.lockoutUntil = null;
-    revokeSessionsForUser(merged.id);
+    await sessionStore.revokeForUser(merged.id);
   }
   users[index] = merged;
 
   writeUsers(users);
+  const privilegeChanged = merged.role !== user.role || merged.status !== user.status;
+  if (privilegeChanged) {
+    await sessionStore.revokeForUser(merged.id);
+  }
   return res.json({ success: true, user: toSafeUser(users[index]) });
 });
 
 // 8. DELETE user (OWNER only)
-app.delete('/api/users/:id', requireOwner, (req: AuthenticatedRequest, res: Response) => {
+app.delete('/api/users/:id', requireOwner, async (req: AuthenticatedRequest, res: Response) => {
   const { id } = req.params;
   const users = readUsers();
   const user = users.find((u) => u.id === id);
@@ -2174,6 +2331,7 @@ app.delete('/api/users/:id', requireOwner, (req: AuthenticatedRequest, res: Resp
 
   const filtered = users.filter((u) => u.id !== id);
   writeUsers(filtered);
+  await sessionStore.revokeForUser(id);
 
   return res.json({ success: true, message: `User ${user.email} removed.` });
 });

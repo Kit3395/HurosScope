@@ -17,7 +17,7 @@ export const LoginForm: React.FC<LoginFormProps> = ({
   onSwitchToRequestAccess,
   className = '',
 }) => {
-  const { login } = useAuth();
+  const { login, authNotice, clearAuthNotice } = useAuth();
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -108,6 +108,15 @@ export const LoginForm: React.FC<LoginFormProps> = ({
       {errorMessage && (
         <div className="mb-5">
           <AuthStatus type="error" message={errorMessage} />
+        </div>
+      )}
+      {authNotice && !errorMessage && (
+        <div className="mb-5">
+          <AuthStatus
+            type="info"
+            message={authNotice}
+            onDismiss={clearAuthNotice}
+          />
         </div>
       )}
 

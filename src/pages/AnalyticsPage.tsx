@@ -53,6 +53,58 @@ export const AnalyticsPage: React.FC = () => {
     };
   }, [businesses, leads, proposals, outreachActivities]);
 
+  // Real insights derived from the workspace's own data — no canned copy.
+  const insights = useMemo(() => {
+    const responded = outreachActivities.filter((o) => o.status === 'REPLIED');
+    const attempted = outreachActivities.filter((o) => o.status !== 'DRAFT');
+
+    // Response rate by business category
+    const bizById = new Map(businesses.map((b) => [b.id, b]));
+    const byCategory = new Map<string, { attempts: number; replies: number }>();
+    for (const o of attempted) {
+      const biz = bizById.get(o.businessId);
+      const cat = biz?.external?.primaryCategoryCode || 'Other';
+      const entry = byCategory.get(cat) || { attempts: 0, replies: 0 };
+      entry.attempts++;
+      if (responded.some((r) => r.id === o.id)) entry.replies++;
+      byCategory.set(cat, entry);
+    }
+    let bestCategory: { cat: string; rate: number; replies: number; attempts: number } | null = null;
+    for (const [cat, s] of byCategory) {
+      if (s.attempts < 2) continue;
+      const rate = s.replies / s.attempts;
+      if (!bestCategory || rate > bestCategory.rate) {
+        bestCategory = { cat, rate, replies: s.replies, attempts: s.attempts };
+      }
+    }
+
+    // Response rate by channel
+    const byChannel = new Map<string, { attempts: number; replies: number }>();
+    for (const o of attempted) {
+      const entry = byChannel.get(o.channel) || { attempts: 0, replies: 0 };
+      entry.attempts++;
+      if (responded.some((r) => r.id === o.id)) entry.replies++;
+      byChannel.set(o.channel, entry);
+    }
+    let bestChannel: { channel: string; rate: number; replies: number; attempts: number } | null = null;
+    for (const [channel, s] of byChannel) {
+      if (s.attempts < 2) continue;
+      const rate = s.replies / s.attempts;
+      if (!bestChannel || rate > bestChannel.rate) {
+        bestChannel = { channel, rate, replies: s.replies, attempts: s.attempts };
+      }
+    }
+
+    // No-website share among qualified leads
+    const qualified = leads.filter((l) => !['Discover', 'New', 'Researching', 'Lost'].includes(l.status));
+    const noSite = qualified.filter((l) => {
+      const biz = bizById.get(l.businessId);
+      return biz && !biz.identifiers?.normalizedDomain;
+    });
+
+    return { bestCategory, bestChannel, qualified: qualified.length, noSite: noSite.length, attempted: attempted.length };
+  }, [businesses, leads, outreachActivities]);
+
   return (
     <div className="space-y-6 max-w-7xl mx-auto h-full flex flex-col">
       {/* Page Header */}
@@ -140,45 +192,77 @@ export const AnalyticsPage: React.FC = () => {
             </div>
             
             <div className="space-y-4">
-              <div className="bg-white/60 rounded-lg p-3 border border-white shadow-sm backdrop-blur-sm">
-                 <div className="flex items-start space-x-2">
-                    <Lightbulb className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
-                    <div>
-                      <h4 className="text-xs font-bold text-slate-800">Highest Response Rate</h4>
-                      <p className="text-[11px] text-slate-600 mt-1 leading-relaxed">
-                        <span className="font-semibold text-slate-800">Restaurants</span> generated the highest response rate across your recent campaigns, particularly when reached out via <span className="font-semibold text-slate-800">Facebook Messenger</span>.
-                      </p>
-                    </div>
-                 </div>
-              </div>
+              {insights.attempted === 0 ? (
+                <div className="bg-white/60 rounded-lg p-4 border border-white shadow-sm text-[11px] text-slate-600 leading-relaxed">
+                  <span className="font-semibold text-slate-800">Not enough activity yet.</span>{' '}
+                  Insights appear here once outreach attempts are logged — every number below is computed from your workspace data, never canned.
+                </div>
+              ) : (
+                <>
+                  <div className="bg-white/60 rounded-lg p-3 border border-white shadow-sm backdrop-blur-sm">
+                     <div className="flex items-start space-x-2">
+                        <Lightbulb className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
+                        <div>
+                          <h4 className="text-xs font-bold text-slate-800">Best-Performing Category</h4>
+                          <p className="text-[11px] text-slate-600 mt-1 leading-relaxed">
+                            {insights.bestCategory ? (
+                              <>
+                                <span className="font-semibold text-slate-800">{insights.bestCategory.cat}</span> replies at{' '}
+                                <span className="font-semibold text-slate-800">{Math.round(insights.bestCategory.rate * 100)}%</span>{' '}
+                                ({insights.bestCategory.replies}/{insights.bestCategory.attempts} outreach attempts).
+                              </>
+                            ) : (
+                              'No category has enough outreach attempts yet to rank performance.'
+                            )}
+                          </p>
+                        </div>
+                     </div>
+                  </div>
 
-              <div className="bg-white/60 rounded-lg p-3 border border-white shadow-sm backdrop-blur-sm">
-                 <div className="flex items-start space-x-2">
-                    <Target className="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" />
-                    <div>
-                      <h4 className="text-xs font-bold text-slate-800">Strongest Prospect Segment</h4>
-                      <p className="text-[11px] text-slate-600 mt-1 leading-relaxed">
-                        Businesses with <span className="font-semibold text-slate-800">100+ Google reviews but no website</span> are converting to meetings 40% faster than other cohorts.
-                      </p>
-                    </div>
-                 </div>
-              </div>
+                  <div className="bg-white/60 rounded-lg p-3 border border-white shadow-sm backdrop-blur-sm">
+                     <div className="flex items-start space-x-2">
+                        <Target className="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" />
+                        <div>
+                          <h4 className="text-xs font-bold text-slate-800">No-Website Segment</h4>
+                          <p className="text-[11px] text-slate-600 mt-1 leading-relaxed">
+                            {insights.qualified > 0 ? (
+                              <>
+                                <span className="font-semibold text-slate-800">{insights.noSite} of {insights.qualified}</span>{' '}
+                                qualified leads have no detected website — a strong redesign pitch signal.
+                              </>
+                            ) : (
+                              'No qualified leads yet. Import and qualify leads to surface the no-website segment.'
+                            )}
+                          </p>
+                        </div>
+                     </div>
+                  </div>
 
-              <div className="bg-white/60 rounded-lg p-3 border border-white shadow-sm backdrop-blur-sm">
-                 <div className="flex items-start space-x-2">
-                    <TrendingUp className="w-4 h-4 text-blue-500 mt-0.5 shrink-0" />
-                    <div>
-                      <h4 className="text-xs font-bold text-slate-800">Social Engagement Signal</h4>
-                      <p className="text-[11px] text-slate-600 mt-1 leading-relaxed">
-                        Facebook-active businesses respond more often than businesses with no social presence. Prioritize leads with recent social activity.
-                      </p>
-                    </div>
-                 </div>
-              </div>
+                  <div className="bg-white/60 rounded-lg p-3 border border-white shadow-sm backdrop-blur-sm">
+                     <div className="flex items-start space-x-2">
+                        <TrendingUp className="w-4 h-4 text-blue-500 mt-0.5 shrink-0" />
+                        <div>
+                          <h4 className="text-xs font-bold text-slate-800">Best Channel</h4>
+                          <p className="text-[11px] text-slate-600 mt-1 leading-relaxed">
+                            {insights.bestChannel ? (
+                              <>
+                                <span className="font-semibold text-slate-800">{insights.bestChannel.channel}</span> leads at{' '}
+                                <span className="font-semibold text-slate-800">{Math.round(insights.bestChannel.rate * 100)}%</span>{' '}
+                                reply rate ({insights.bestChannel.replies}/{insights.bestChannel.attempts}).
+                              </>
+                            ) : (
+                              'No channel has enough attempts yet to compare reply rates.'
+                            )}
+                          </p>
+                        </div>
+                     </div>
+                  </div>
+                </>
+              )}
             </div>
             
             <div className="mt-5 pt-3 border-t border-indigo-200/50 text-[10px] text-center text-indigo-700/70 font-medium">
-              Patterns updated in real-time based on your CRM activity
+              Computed live from your workspace data — no sample or demo figures
             </div>
           </div>
         </div>

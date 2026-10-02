@@ -156,7 +156,7 @@ export const MCP_REGISTERED_TOOLS: MCPToolDefinition[] = [
   {
     name: 'crm_read_businesses',
     description:
-      'Queries active CRM business profiles and saved leads from the local storage vault or Supabase persistence layer.',
+      'Queries the server-side business registry populated by live Places discovery (name, address, rating, opportunity score). Supports text search with limit.',
     inputSchema: {
       type: 'object',
       properties: {

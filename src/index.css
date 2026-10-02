@@ -594,3 +594,21 @@ html {
   border-color: #E2E8F0 !important;
 }
 
+
+/* Global keyboard focus visibility — every interactive element gets a clear
+   focus ring when navigated by keyboard. */
+:focus-visible {
+  outline: 2px solid #B48C36;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Remove the outline for mouse users where the component already provides
+   its own hover state, but keep it for keyboard navigation. */
+button:focus:not(:focus-visible),
+a:focus:not(:focus-visible),
+input:focus:not(:focus-visible),
+select:focus:not(:focus-visible),
+textarea:focus:not(:focus-visible) {
+  outline: none;
+}

@@ -13,6 +13,7 @@ import {
   MCPResourceDefinition,
   MCPGatewayMetrics,
 } from './types';
+import { apiFetch } from '../services/api';
 
 export class MCPClient {
   private baseEndpoint = '/api/mcp';
@@ -30,7 +31,7 @@ export class MCPClient {
       params,
     };
 
-    const response = await fetch(this.baseEndpoint, {
+    const response = await apiFetch(this.baseEndpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -103,7 +104,7 @@ export class MCPClient {
    * Fetches real-time MCP Gateway telemetry and governance metrics
    */
   public async getMetrics(): Promise<MCPGatewayMetrics> {
-    const response = await fetch('/api/mcp/stats');
+    const response = await apiFetch('/api/mcp/stats');
     if (!response.ok) {
       throw new Error(`Failed to fetch MCP metrics: HTTP ${response.status}`);
     }

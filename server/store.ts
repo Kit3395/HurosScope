@@ -24,8 +24,8 @@ export interface SnapshotStore {
   name: string;
   /** Returns the raw JSON snapshot, or null when nothing is stored yet. */
   load(): Promise<string | null>;
-  /** Persists the raw JSON snapshot. Must never throw — log and continue. */
-  save(json: string): Promise<void>;
+  /** Persists the raw JSON snapshot. Must never throw — returns false on failure. */
+  save(json: string): Promise<boolean>;
 }
 
 // ---------------------------------------------------------------------------
@@ -49,12 +49,14 @@ export class FileSnapshotStore implements SnapshotStore {
     }
   }
 
-  async save(json: string): Promise<void> {
+  async save(json: string): Promise<boolean> {
     try {
       fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
       fs.writeFileSync(this.filePath, json);
+      return true;
     } catch (err) {
       console.error(`[STORAGE] File store save failed:`, (err as Error)?.message || err);
+      return false;
     }
   }
 }
@@ -115,7 +117,7 @@ export class TursoSnapshotStore implements SnapshotStore {
     }
   }
 
-  async save(json: string): Promise<void> {
+  async save(json: string): Promise<boolean> {
     try {
       await this.ensureReady();
       const client = await this.getClient();
@@ -123,23 +125,61 @@ export class TursoSnapshotStore implements SnapshotStore {
         sql: `INSERT INTO ${TURSO_TABLE} (id, snapshot, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET snapshot = excluded.snapshot, updated_at = excluded.updated_at`,
         args: [TURSO_ROW_ID, json, new Date().toISOString()],
       });
+      return true;
     } catch (err) {
       console.error('[STORAGE] Turso save failed:', (err as Error)?.message || err);
+      return false;
     }
   }
 }
 
 // ---------------------------------------------------------------------------
-// Factory
+// Factory — saves are serialized through a promise-chain mutex so concurrent
+// mutations cannot interleave into lost writes.
 // ---------------------------------------------------------------------------
+
+let saveChain: Promise<void> = Promise.resolve();
+let consecutiveSaveFailures = 0;
+
+function noteSaveResult(ok: boolean): void {
+  if (ok) {
+    consecutiveSaveFailures = 0;
+  } else {
+    consecutiveSaveFailures++;
+    if (consecutiveSaveFailures === 3) {
+      console.error(
+        '[STORAGE] 3 consecutive snapshot save failures — data may be lost on restart. Check Turso connectivity.'
+      );
+    }
+  }
+}
 
 export function createSnapshotStore(filePath: string): SnapshotStore {
   const url = process.env.TURSO_DATABASE_URL;
   const token = process.env.TURSO_AUTH_TOKEN;
+  const inner: SnapshotStore = url && token
+    ? new TursoSnapshotStore(url, token)
+    : new FileSnapshotStore(filePath);
   if (url && token) {
     console.log('[STORAGE] Using Turso snapshot backend.');
-    return new TursoSnapshotStore(url, token);
+  } else {
+    console.log('[STORAGE] TURSO_DATABASE_URL / TURSO_AUTH_TOKEN not set — using local file backend.');
   }
-  console.log('[STORAGE] TURSO_DATABASE_URL / TURSO_AUTH_TOKEN not set — using local file backend.');
-  return new FileSnapshotStore(filePath);
+
+  // Wrap save in the mutex; never throws.
+  const store: SnapshotStore = {
+    name: inner.name,
+    load: () => inner.load(),
+    save: (json: string) => {
+      const run: Promise<boolean> = saveChain.then(() => inner.save(json));
+      run.then((ok) => noteSaveResult(ok), () => noteSaveResult(false));
+      // The chain itself must never reject.
+      saveChain = run.then(
+        () => undefined,
+        () => undefined
+      );
+      return run;
+    },
+  };
+  return store;
 }

@@ -63,7 +63,7 @@ export const MapPage: React.FC<{
       return {
         business,
         lead,
-        score: latestScore?.aiScoreData?.overallProspectScore || Math.min(96, Math.max(45, (hash % 50) + 48)),
+        score: latestScore?.aiScoreData?.overallProspectScore ?? null,
         position: { lat, lng },
         category: business.external.primaryCategoryCode || 'General Services',
         status: lead?.pipelineStatus || 'New',
@@ -75,7 +75,7 @@ export const MapPage: React.FC<{
     return mapData.filter((item) => {
       if (filters.status !== 'ALL' && item.status !== filters.status) return false;
       if (filters.category !== 'ALL' && item.category !== filters.category) return false;
-      if (item.score < filters.minScore) return false;
+      if (item.score !== null && item.score < filters.minScore) return false;
       if (filters.searchQuery.trim()) {
         const q = filters.searchQuery.toLowerCase();
         const name = (item.business.crm.verifiedBusinessName || item.business.external.tradeName || '').toLowerCase();
@@ -94,7 +94,14 @@ export const MapPage: React.FC<{
     return filteredData[0] || null;
   }, [selectedBusinessId, mapData, filteredData]);
 
-  const getScoreBadge = (score: number) => {
+  const getScoreBadge = (score: number | null) => {
+    if (score === null) {
+      return {
+        label: 'UNSCORED',
+        color: 'text-slate-500 bg-slate-50 border-slate-200',
+        dot: 'bg-slate-300',
+      };
+    }
     if (score >= 85) {
       return {
         label: 'HOT ICP',
@@ -327,7 +334,7 @@ export const MapPage: React.FC<{
                     </div>
                     <div className="shrink-0 flex items-center space-x-1.5 font-bold font-mono">
                       <span className={`w-2 h-2 rounded-full ${badge.dot}`}></span>
-                      <span className="text-xs text-slate-800">{item.score}</span>
+                      <span className="text-xs text-slate-800">{item.score ?? '—'}</span>
                     </div>
                   </button>
                 );
@@ -353,7 +360,7 @@ export const MapPage: React.FC<{
                     Metro Territory Map Canvas
                   </h2>
                   <p className="text-[11px] text-slate-500">
-                    Cebu City Metro Hub & Regional Nodes • Real-time Coordinate Projection
+                    Cebu City Metro Hub & Regional Nodes • Approximate positions (no GPS data)
                   </p>
                 </div>
               </div>
@@ -410,9 +417,11 @@ export const MapPage: React.FC<{
                 const name = item.business.crm.verifiedBusinessName || item.business.external.tradeName;
 
                 return (
-                  <div
+                  <button
                     key={item.business.id}
+                    type="button"
                     onClick={() => setSelectedBusinessId(item.business.id)}
+                    aria-label={`${name}${item.score === null ? ', not scored yet' : `, redesign score ${item.score}`}`}
                     className="absolute cursor-pointer transition-transform hover:scale-125"
                     style={{
                       left: `${x}%`,
@@ -420,7 +429,7 @@ export const MapPage: React.FC<{
                       transform: 'translate(-50%, -50%)',
                       zIndex: isSelected ? 30 : 10,
                     }}
-                    title={`${name} • Redesign Score: ${item.score}`}
+                    title={item.score === null ? `${name} • Not scored yet` : `${name} • Redesign Score: ${item.score}`}
                   >
                     <div
                       className={`relative flex items-center justify-center rounded-full p-1 transition-all shadow-md ${
@@ -430,7 +439,7 @@ export const MapPage: React.FC<{
                       }`}
                     >
                       <div className={`w-3.5 h-3.5 rounded-full ${badge.dot} flex items-center justify-center text-white font-mono text-[8px] font-bold`}>
-                        {item.score >= 85 ? '!' : ''}
+                        {item.score !== null && item.score >= 85 ? '!' : ''}
                       </div>
 
                       {/* Tooltip Tag */}
@@ -442,10 +451,10 @@ export const MapPage: React.FC<{
                         }`}
                       >
                         <span className="truncate max-w-[130px] inline-block align-middle">{name}</span>
-                        <span className="ml-1 text-amber-400">★{item.score}</span>
+                        {item.score !== null && <span className="ml-1 text-amber-400">★{item.score}</span>}
                       </div>
                     </div>
-                  </div>
+                  </button>
                 );
               })}
 
@@ -453,7 +462,7 @@ export const MapPage: React.FC<{
               <div className="absolute bottom-3 left-3 right-3 flex items-center justify-between text-[11px] bg-white/95 backdrop-blur-xs px-3.5 py-2 rounded-xl border border-slate-200 shadow-xs font-medium text-slate-600">
                 <span className="flex items-center gap-1.5">
                   <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>Interactive Verified Coordinates</span>
+                  <span>Approximate Positions — Not GPS-Verified</span>
                 </span>
                 <span className="font-mono text-[10px] text-slate-500">
                   Lat: 10.3157° N • Lng: 123.8854° E
@@ -473,7 +482,8 @@ export const MapPage: React.FC<{
                         getScoreBadge(activeSelectedItem.score).color
                       }`}
                     >
-                      {getScoreBadge(activeSelectedItem.score).label} • {activeSelectedItem.score} / 100
+                      {getScoreBadge(activeSelectedItem.score).label}
+                      {activeSelectedItem.score !== null && ` • ${activeSelectedItem.score} / 100`}
                     </span>
                     <span className="text-xs text-slate-500 font-medium">
                       Stage: <strong className="text-slate-800">{activeSelectedItem.status}</strong>

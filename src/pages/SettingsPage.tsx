@@ -26,6 +26,7 @@ import { PHASE_0_FEATURE_LOCKS, RATE_LIMIT_CONFIG, PRIVACY_POLICIES } from '../c
 import { formatAuditTimestamp } from '../utils';
 import { AuditLog } from '../types';
 import { databaseScaleService, businessService } from '../services';
+import { repository } from '../database';
 import { userAccessService } from '../services/userAccessService';
 import { ChangePasswordCard } from '../components/ChangePasswordCard';
 
@@ -44,14 +45,48 @@ export const SettingsPage: React.FC = () => {
   const [isSimulating, setIsSimulating] = useState(false);
   const [purgeStatus, setPurgeStatus] = useState<string | null>(null);
 
+  const [purgeModalOpen, setPurgeModalOpen] = useState(false);
+  const [purgeConfirmText, setPurgeConfirmText] = useState('');
+
+  // Download a full JSON backup before any destructive purge.
+  const downloadPrePurgeBackup = (): boolean => {
+    try {
+      const dump = repository.exportCompleteDump();
+      const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), ...dump }, null, 2)], {
+        type: 'application/json',
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `horuscope-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   const handlePurgeToCleanState = () => {
+    if (purgeConfirmText.trim().toUpperCase() !== 'PURGE') return;
+    // Safety first: attempt a local backup. Purge proceeds only if the user
+    // explicitly confirmed; the backup is best-effort and reported honestly.
+    const backupOk = downloadPrePurgeBackup();
     businessService.purgeToCleanProductionState();
     userAccessService.resetToProductionState();
     setScaleMetrics(databaseScaleService.getMetrics());
     setLogs(auditService.getLogs());
     setBenchmarkResult(null);
-    setPurgeStatus('Database and User Registry successfully purged to clean production state (0 filler records).');
-    setTimeout(() => setPurgeStatus(null), 5000);
+    setPurgeModalOpen(false);
+    setPurgeConfirmText('');
+    setPurgeStatus(
+      backupOk
+        ? 'Database purged to clean state. A backup was downloaded before purging.'
+        : 'Database purged to clean state. WARNING: the automatic backup download failed — data may be unrecoverable.'
+    );
+    setTimeout(() => setPurgeStatus(null), 8000);
   };
 
   const refreshLogs = () => {
@@ -376,7 +411,7 @@ export const SettingsPage: React.FC = () => {
 
             <div className="flex items-center space-x-2">
               <button
-                onClick={handlePurgeToCleanState}
+                onClick={() => { setPurgeModalOpen(true); setPurgeConfirmText(''); }}
                 className="px-3.5 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 border border-rose-300 text-rose-700 hover:text-rose-900 text-xs font-mono font-medium transition-colors cursor-pointer flex items-center space-x-1.5"
               >
                 <Trash2 className="w-3.5 h-3.5 text-rose-500" />
@@ -389,6 +424,70 @@ export const SettingsPage: React.FC = () => {
             <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 flex items-center space-x-2 text-xs font-mono text-emerald-800">
               <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
               <span>{purgeStatus}</span>
+            </div>
+          )}
+
+          {/* Purge confirmation modal — destructive, requires typed confirmation */}
+          {purgeModalOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="purge-modal-title">
+              <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 space-y-4 border border-rose-200">
+                <div className="flex items-start space-x-3">
+                  <div className="p-2 rounded-lg bg-rose-100 shrink-0">
+                    <AlertTriangle className="w-5 h-5 text-rose-600" />
+                  </div>
+                  <div>
+                    <h3 id="purge-modal-title" className="text-sm font-bold text-slate-900">
+                      Purge the entire workspace database?
+                    </h3>
+                    <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                      This permanently deletes all businesses, leads, contacts, outreach history, follow-ups,
+                      proposals, audits and scores, and clears the local user mirror. This cannot be undone.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-xs font-mono text-slate-700 space-y-1">
+                  <div className="flex justify-between"><span>Businesses</span><span className="font-bold">{scaleMetrics.businessesCount}</span></div>
+                  <div className="flex justify-between"><span>Leads</span><span className="font-bold">{scaleMetrics.leadsCount}</span></div>
+                  <div className="flex justify-between"><span>Proposals</span><span className="font-bold">{scaleMetrics.proposalsCount}</span></div>
+                </div>
+
+                <p className="text-[11px] text-slate-500 leading-relaxed">
+                  A JSON backup will be downloaded automatically before purging. Keep it somewhere safe —
+                  there is no server-side restore for a local purge.
+                </p>
+
+                <div>
+                  <label htmlFor="purge-confirm-input" className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-1.5">
+                    Type PURGE to confirm
+                  </label>
+                  <input
+                    id="purge-confirm-input"
+                    type="text"
+                    value={purgeConfirmText}
+                    onChange={(e) => setPurgeConfirmText(e.target.value)}
+                    placeholder="PURGE"
+                    autoComplete="off"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-rose-500 focus:border-rose-500"
+                  />
+                </div>
+
+                <div className="flex items-center justify-end space-x-2 pt-1">
+                  <button
+                    onClick={() => { setPurgeModalOpen(false); setPurgeConfirmText(''); }}
+                    className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 text-xs font-semibold hover:bg-slate-50 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handlePurgeToCleanState}
+                    disabled={purgeConfirmText.trim().toUpperCase() !== 'PURGE'}
+                    className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Purge Everything
+                  </button>
+                </div>
+              </div>
             </div>
           )}
 

@@ -1,19 +1,18 @@
 /**
  * HoruScope - Server-side authentication (Node-only).
  *
- * Replaces the previous client-side-only credential verification. Passwords
- * are verified here with the same salted SHA-256 key-stretching scheme the
- * client historically used, so pre-existing hashes keep verifying — but all
- * trust decisions now happen server-side and every /api route (except the
- * public login/health/access-request-submit endpoints) requires a Bearer
- * session token.
+ * Passwords are verified here with the same salted SHA-256 key-stretching
+ * scheme the client historically used. All trust decisions happen server-side.
  *
- * Sessions are in-memory opaque tokens. They do not survive a server restart
- * by design — clients simply log in again.
+ * Sessions are opaque tokens persisted via server/sessions.ts (Turso when
+ * configured, memory otherwise). The session travels as an httpOnly Secure
+ * SameSite cookie; the Authorization Bearer header is still accepted for
+ * programmatic API/MCP access.
  */
 
 import { webcrypto, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Request, Response, NextFunction } from 'express';
+import { sessionStore } from './sessions.ts';
 
 const subtle = webcrypto.subtle;
 
@@ -73,57 +72,32 @@ export const COMPROMISED_DEFAULT_HASH =
   'c3fd23514a9c3b03255bbc3a5cb1c01d21c5746778db75c41c467f454c6d87f5';
 
 // ---------------------------------------------------------------------------
-// Sessions
+// Session cookies
 // ---------------------------------------------------------------------------
 
-export interface Session {
-  token: string;
-  userId: string;
-  email: string;
-  role: string;
-  createdAt: number;
-  lastSeenAt: number;
+export const SESSION_COOKIE_NAME = 'horuscope_session';
+const SESSION_COOKIE_MAX_AGE = 12 * 60 * 60; // 12h in seconds
+
+export function setSessionCookie(res: Response, token: string): void {
+  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+  res.setHeader(
+    'Set-Cookie',
+    `${SESSION_COOKIE_NAME}=${token}; HttpOnly; Path=/${secure}; SameSite=Lax; Max-Age=${SESSION_COOKIE_MAX_AGE}`
+  );
 }
 
-const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
-const sessions = new Map<string, Session>();
-
-export function createSession(userId: string, email: string, role: string): Session {
-  const token = randomBytes(32).toString('hex');
-  const now = Date.now();
-  const session: Session = { token, userId, email, role, createdAt: now, lastSeenAt: now };
-  sessions.set(token, session);
-  return session;
+export function clearSessionCookie(res: Response): void {
+  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+  res.setHeader(
+    'Set-Cookie',
+    `${SESSION_COOKIE_NAME}=; HttpOnly; Path=/${secure}; SameSite=Lax; Max-Age=0`
+  );
 }
 
-export function getSession(token: string | undefined | null): Session | null {
-  if (!token) return null;
-  const session = sessions.get(token);
-  if (!session) return null;
-  if (Date.now() - session.createdAt > SESSION_TTL_MS) {
-    sessions.delete(token);
-    return null;
-  }
-  session.lastSeenAt = Date.now();
-  return session;
-}
-
-export function revokeSession(token: string | undefined | null): void {
-  if (token) sessions.delete(token);
-}
-
-export function revokeSessionsForUser(userId: string): void {
-  for (const [token, session] of sessions) {
-    if (session.userId === userId) sessions.delete(token);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Express middleware
-// ---------------------------------------------------------------------------
-
-export interface AuthenticatedRequest extends Request {
-  session?: Session;
+function cookieToken(req: Request): string | null {
+  const header = req.headers.cookie || '';
+  const match = header.match(new RegExp(`(?:^|;\\s*)${SESSION_COOKIE_NAME}=([^;]+)`));
+  return match ? decodeURIComponent(match[1].trim()) : null;
 }
 
 function bearerToken(req: Request): string | null {
@@ -132,22 +106,71 @@ function bearerToken(req: Request): string | null {
   return match ? match[1].trim() : null;
 }
 
-/** Rejects the request unless a valid Bearer session token is present. */
-export function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction): void {
-  const session = getSession(bearerToken(req));
-  if (!session) {
-    res.status(401).json({ error: 'UNAUTHORIZED', message: 'Valid session required.' });
-    return;
-  }
-  req.session = session;
-  next();
+/** Session token from cookie (preferred) or Authorization header. */
+export function requestToken(req: Request): string | null {
+  return cookieToken(req) || bearerToken(req);
 }
 
-/** Rejects unless the session belongs to an OWNER. Must run after requireAuth. */
-export function requireOwner(req: AuthenticatedRequest, res: Response, next: NextFunction): void {
-  if (!req.session || req.session.role !== 'OWNER') {
-    res.status(403).json({ error: 'FORBIDDEN', message: 'Owner role required.' });
-    return;
-  }
-  next();
+// ---------------------------------------------------------------------------
+// Middleware factory — wired with a live user resolver to avoid import cycles
+// ---------------------------------------------------------------------------
+
+export interface LiveUser {
+  id: string;
+  email: string;
+  role: string;
+  status: string;
 }
+
+export interface AuthenticatedRequest extends Request {
+  session?: {
+    token: string;
+    userId: string;
+    email: string;
+    role: string;
+  };
+}
+
+export function createAuthMiddleware(resolveUser: (userId: string) => LiveUser | undefined): {
+  requireAuth: (req: AuthenticatedRequest, res: Response, next: NextFunction) => void;
+  requireOwner: (req: AuthenticatedRequest, res: Response, next: NextFunction) => void;
+} {
+  /**
+   * Rejects unless a valid session exists AND the user still exists with
+   * APPROVED status. The role is refreshed from the live user record, so
+   * demotions and deletions take effect immediately (no stale privileges).
+   */
+  async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+    const session = await sessionStore.get(requestToken(req));
+    if (!session) {
+      res.status(401).json({ error: 'UNAUTHORIZED', message: 'Valid session required.' });
+      return;
+    }
+    const user = resolveUser(session.userId);
+    if (!user || user.status !== 'APPROVED') {
+      await sessionStore.revoke(session.token);
+      res.status(401).json({ error: 'UNAUTHORIZED', message: 'Account is no longer active.' });
+      return;
+    }
+    req.session = {
+      token: session.token,
+      userId: user.id,
+      email: user.email,
+      role: user.role,
+    };
+    next();
+  }
+
+  function requireOwner(req: AuthenticatedRequest, res: Response, next: NextFunction): void {
+    if (!req.session || req.session.role !== 'OWNER') {
+      res.status(403).json({ error: 'FORBIDDEN', message: 'Owner role required.' });
+      return;
+    }
+    next();
+  }
+
+  return { requireAuth, requireOwner };
+}
+
+// Re-exported for routes that manage sessions directly.
+export { sessionStore };

@@ -1,5 +1,10 @@
 /**
- * Currency Formatting Utility - Philippine Peso (PHP / ₱)
+ * Currency Truth: HoruScope operates in Philippine Peso (PHP / ₱).
+ *
+ * Legacy model fields named `*USD` (Proposal.totalUSD, Lead.estimatedDealValueUSD,
+ * ProposalItem.fixedPriceUSD) hold PHP amounts despite their names — a naming
+ * debt from the original schema. Do NOT convert them; format them as PHP.
+ * New fields must use PHP-suffixed names.
  */
 export function formatPHP(amount: number | undefined | null): string {
   const value = typeof amount === 'number' && !isNaN(amount) ? amount : 0;

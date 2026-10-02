@@ -549,8 +549,8 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                       }[lead.priority || 'MEDIUM'];
 
                       const prob = lead.probability !== undefined ? lead.probability : 50;
-                      const dealValue = lead.estimatedDealValueUSD || 45000;
-                      const calculatedWeighted = Math.round((dealValue * prob) / 100);
+                      const dealValue: number | null = lead.estimatedDealValueUSD ?? null;
+                      const calculatedWeighted = dealValue !== null ? Math.round((dealValue * prob) / 100) : null;
                       const leadScore = intelligenceService.getLatestLeadScore(lead.businessId);
 
                       const isDragging = draggingLeadId === lead.id;
@@ -567,14 +567,16 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                           {/* Card Header: Business Name & Edit / Details Button */}
                           <div className="flex items-start justify-between gap-2">
                             <div className="min-w-0">
-                              <h4
+                              <button
+                                type="button"
                                 onClick={() => onLeadSelect(lead.id)}
-                                title="Click to open full 13-section technical dossier"
-                                className="font-bold text-slate-900 text-sm tracking-tight truncate hover:text-cyan-700 transition-colors cursor-pointer flex items-center space-x-1"
+                                title="Open full 13-section technical dossier"
+                                aria-label={`Open dossier for ${bizName}`}
+                                className="font-bold text-slate-900 text-sm tracking-tight truncate hover:text-cyan-700 transition-colors cursor-pointer flex items-center space-x-1 text-left"
                               >
                                 <span className="truncate">{bizName}</span>
-                                <ExternalLink className="w-3 h-3 opacity-0 group-hover:opacity-100 transition-opacity shrink-0 text-cyan-600" />
-                              </h4>
+                                <ExternalLink className="w-3 h-3 opacity-0 group-hover:opacity-100 transition-opacity shrink-0 text-cyan-600" aria-hidden="true" />
+                              </button>
                               <div className="text-[11px] text-slate-500 truncate mt-0.5 font-medium">
                                 {biz?.external.primaryCategoryCode || 'Local Business'} •{' '}
                                 {biz?.external.externalAddress?.locality || 'Philippines'}
@@ -591,7 +593,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                           <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200 space-y-1 text-xs">
                             <div className="flex items-center justify-between">
                               <span className="font-bold text-slate-900 text-sm">
-                                {formatPHP(dealValue)}
+                                {dealValue !== null ? formatPHP(dealValue) : <span className="text-xs font-medium text-slate-400">No value set</span>}
                               </span>
                               <span className="text-[11px] font-mono text-cyan-800 font-bold">
                                 {prob}% prob
@@ -609,7 +611,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                             <div className="flex items-center justify-between text-[10px] text-slate-500 pt-0.5">
                               <span>Forecast Value:</span>
                               <span className="font-mono text-emerald-700 font-bold">
-                                {formatPHP(calculatedWeighted)}
+                                {calculatedWeighted !== null ? formatPHP(calculatedWeighted) : '—'}
                               </span>
                             </div>
                           </div>

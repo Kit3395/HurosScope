@@ -1,31 +1,12 @@
 /**
  * HoruScope - Authenticated API client (browser).
  *
- * All calls to the HoruScope backend go through here. The Bearer session
- * token issued by POST /api/auth/login is attached automatically. On a 401
- * the token is discarded so the app returns to the login gate.
+ * Authentication travels as an httpOnly Secure SameSite session cookie set
+ * by the server — the token is never readable from JavaScript, so XSS cannot
+ * steal it. All requests use `credentials: 'include'` so the cookie is sent.
+ * The Authorization Bearer header is still accepted by the server for
+ * programmatic access, but the UI no longer stores tokens in localStorage.
  */
-
-const TOKEN_KEY = 'horusscope_auth_token_v1';
-
-export function getAuthToken(): string | null {
-  if (typeof window === 'undefined') return null;
-  try {
-    return localStorage.getItem(TOKEN_KEY);
-  } catch {
-    return null;
-  }
-}
-
-export function setAuthToken(token: string | null): void {
-  if (typeof window === 'undefined') return;
-  try {
-    if (token) localStorage.setItem(TOKEN_KEY, token);
-    else localStorage.removeItem(TOKEN_KEY);
-  } catch {
-    // ignore storage errors
-  }
-}
 
 export interface ApiError extends Error {
   status: number;
@@ -46,35 +27,29 @@ async function readError(res: Response): Promise<{ message: string; code?: strin
 
 /**
  * Authenticated fetch against the HoruScope backend.
- * Throws ApiError on non-2xx. Clears the stored token on 401.
+ * Throws ApiError on non-2xx.
+ *
+ * On 401 the session is gone (expired/revoked) — a global
+ * `horuscope:session-expired` event is dispatched so AuthContext can return
+ * the user to the login gate with an explanation instead of leaving each
+ * component to fail on its own.
  */
 export async function apiFetch(path: string, options: RequestInit = {}): Promise<Response> {
   const headers = new Headers(options.headers || {});
-  const token = getAuthToken();
-  if (token && !headers.has('Authorization')) {
-    headers.set('Authorization', `Bearer ${token}`);
-  }
   if (options.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
 
-  const res = await fetch(path, { ...options, headers });
-
-  if (res.status === 401) {
-    // Session invalid/expired — drop it so the UI returns to login.
-    setAuthToken(null);
-    const { message, code } = await readError(res);
-    const err = new Error(message) as ApiError;
-    err.status = 401;
-    err.code = code;
-    throw err;
-  }
+  const res = await fetch(path, { ...options, headers, credentials: 'include' });
 
   if (!res.ok) {
     const { message, code } = await readError(res);
     const err = new Error(message) as ApiError;
     err.status = res.status;
     err.code = code;
+    if (res.status === 401 && typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('horuscope:session-expired', { detail: { path, code } }));
+    }
     throw err;
   }
 
@@ -105,4 +80,17 @@ export async function apiPut<T>(path: string, body?: unknown): Promise<T> {
 export async function apiDelete<T>(path: string): Promise<T> {
   const res = await apiFetch(path, { method: 'DELETE' });
   return res.json() as Promise<T>;
+}
+
+// --- Legacy token helpers (kept as no-ops for compatibility; the session
+// --- cookie is now the single source of truth). New code must not use these.
+
+/** @deprecated Session cookie is used instead. */
+export function getAuthToken(): string | null {
+  return null;
+}
+
+/** @deprecated Session cookie is used instead. */
+export function setAuthToken(_token: string | null): void {
+  // no-op
 }

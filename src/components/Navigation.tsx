@@ -103,6 +103,36 @@ export const Navigation: React.FC<NavigationProps> = ({ activePage, onSelectPage
         </div>
       </div>
 
+      {/* Mobile user chip with logout — the desktop session bar below is lg-only */}
+      {currentUser && (
+        <div className="lg:hidden pt-2 border-t border-slate-200">
+          <div className="flex items-center justify-between p-2 rounded-xl bg-slate-50 border border-slate-200">
+            <div className="flex items-center space-x-2 min-w-0">
+              <div className="w-7 h-7 rounded-full bg-blue-600 text-white flex items-center justify-center font-bold text-xs shrink-0 uppercase">
+                {currentUser.displayName.charAt(0)}
+              </div>
+              <div className="min-w-0 truncate">
+                <div className="text-xs font-bold text-slate-900 truncate">
+                  {currentUser.displayName}
+                </div>
+                <div className="text-[10px] font-mono text-blue-700 font-semibold">
+                  {currentUser.role}
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={logout}
+              aria-label="Sign out"
+              className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-600 hover:text-red-600 hover:bg-red-50 border border-slate-200 transition-colors cursor-pointer"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Sign out</span>
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="hidden lg:block pt-4 border-t border-slate-200 space-y-3">
         {/* Current User Session Bar */}
         {currentUser && (

@@ -104,7 +104,7 @@ export const LeadDetailPanel: React.FC<LeadDetailPanelProps> = ({
   // Manual Pricing States for Deal Value
   const [isEditingDealValue, setIsEditingDealValue] = useState(false);
   const [customDealValue, setCustomDealValue] = useState<string>(
-    lead.estimatedDealValueUSD ? String(lead.estimatedDealValueUSD) : '45000'
+    lead.estimatedDealValueUSD ? String(lead.estimatedDealValueUSD) : ''
   );
 
   // Manual Pricing States for Proposals
@@ -289,7 +289,7 @@ export const LeadDetailPanel: React.FC<LeadDetailPanelProps> = ({
     return activeSection === 'all' || activeSection === section;
   };
 
-  const displayDealValue = lead.estimatedDealValueUSD || 45000;
+  const displayDealValue: number | null = lead.estimatedDealValueUSD ?? null;
 
   return (
     <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-lg flex flex-col h-full">
@@ -374,7 +374,7 @@ export const LeadDetailPanel: React.FC<LeadDetailPanelProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    setCustomDealValue(String(displayDealValue));
+                    setCustomDealValue(displayDealValue !== null ? String(displayDealValue) : '');
                     setIsEditingDealValue(true);
                   }}
                   className="text-cyan-700 hover:underline flex items-center gap-0.5 cursor-pointer font-semibold"
@@ -414,7 +414,7 @@ export const LeadDetailPanel: React.FC<LeadDetailPanelProps> = ({
               </div>
             ) : (
               <div className="text-base font-black text-slate-900 mt-1 tracking-tight">
-                {formatPHP(displayDealValue)}
+                {displayDealValue !== null ? formatPHP(displayDealValue) : <span className="text-sm font-medium text-slate-400">Not set</span>}
               </div>
             )}
           </div>

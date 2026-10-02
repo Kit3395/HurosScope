@@ -40,6 +40,22 @@ function AppShell() {
     setNavParams(params || {});
   };
 
+  // While the session is being restored, show a branded splash instead of
+  // flashing the login gate (or a blank screen) for valid sessions.
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-slate-950 text-white">
+        <div className="flex items-center space-x-3">
+          <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center animate-pulse">
+            <span className="text-amber-400 font-black text-lg">H</span>
+          </div>
+          <span className="text-xl font-black tracking-tight">HORUSCOPE</span>
+        </div>
+        <p className="text-xs text-slate-400 mt-3 font-mono">Restoring your session…</p>
+      </div>
+    );
+  }
+
   // If user is not authenticated, show the secure Landing & Sign In portal
   if (!isAuthenticated) {
     return <LandingPage />;

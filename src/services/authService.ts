@@ -11,7 +11,6 @@
  */
 
 import { UserAccount } from '../types';
-import { setAuthToken } from './api';
 
 export interface AuthResponse {
   success: boolean;
@@ -78,12 +77,13 @@ class AuthService {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ email: cleanEmail, password }),
       });
       const data = await res.json().catch(() => ({}));
 
-      if (res.ok && data.success && data.token && data.user) {
-        setAuthToken(data.token);
+      if (res.ok && data.success && data.user) {
+        // Server sets the httpOnly session cookie; nothing to store locally.
         this.setRememberedEmail(cleanEmail, rememberMe);
         return { success: true, user: data.user as UserAccount };
       }
@@ -113,18 +113,9 @@ class AuthService {
     }
   }
 
-  /** End the server session and drop the local token. */
+  /** End the server session (clears the httpOnly cookie). */
   public async logout(): Promise<void> {
-    try {
-      const token =
-        typeof window !== 'undefined' ? localStorage.getItem('horusscope_auth_token_v1') : null;
-      await fetch('/api/auth/logout', {
-        method: 'POST',
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      }).catch(() => {});
-    } finally {
-      setAuthToken(null);
-    }
+    await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }).catch(() => {});
   }
 
   public isBusy(): boolean {

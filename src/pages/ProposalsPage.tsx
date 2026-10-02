@@ -10,8 +10,9 @@ import {
   Edit3,
   Save,
   X,
+  Plus,
 } from 'lucide-react';
-import { proposalService, businessService } from '../services';
+import { proposalService, businessService, intelligenceService, leadService } from '../services';
 import { humanApprovalGate } from '../security/approvalGate';
 import { Proposal } from '../types';
 import { PipelineLifecycleBanner } from '../components/PipelineLifecycleBanner';
@@ -31,8 +32,80 @@ export const ProposalsPage: React.FC = () => {
 
   // Manual Pricing editing state
   const [isEditingPricing, setIsEditingPricing] = useState(false);
-  const [customTotalPHP, setCustomTotalPHP] = useState<number>(selectedProp?.totalUSD || 45000);
+  const [customTotalPHP, setCustomTotalPHP] = useState<number>(selectedProp?.totalUSD ?? 0);
   const [customItemPrices, setCustomItemPrices] = useState<Record<string, number>>({});
+
+  // New-proposal creation modal state
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [createBusinessId, setCreateBusinessId] = useState('');
+  const [createTitle, setCreateTitle] = useState('');
+  const [createAmount, setCreateAmount] = useState('45000');
+  const [isCreating, setIsCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+
+  const qualifiedBusinesses = businessService.getAll(false).filter(
+    (b) => b.crm.qualificationStatus === 'QUALIFIED' || leadService.getByBusinessId(b.id)
+  );
+
+  const handleCreateProposal = async (mode: 'ai' | 'blank') => {
+    if (!createBusinessId) {
+      setCreateError('Select a business first.');
+      return;
+    }
+    setIsCreating(true);
+    setCreateError(null);
+    try {
+      let proposal: Proposal;
+      if (mode === 'ai') {
+        proposal = await intelligenceService.generateProposal(createBusinessId);
+        if (createTitle.trim()) {
+          proposal = proposalService.update(proposal.id, { title: createTitle.trim() });
+        }
+      } else {
+        const biz = businessService.getById(createBusinessId);
+        const bizName = biz?.crm.verifiedBusinessName || biz?.external.tradeName || 'Client';
+        const lead = leadService.getByBusinessId(createBusinessId);
+        const amount = Math.max(0, Number(createAmount) || 0);
+        const now = new Date();
+        proposal = proposalService.create({
+          id: `prop_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+          category: 'USER_CRM',
+          businessId: createBusinessId,
+          leadId: lead?.id || `lead_${createBusinessId}`,
+          proposalNumber: `PROP-${now.getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`,
+          title: createTitle.trim() || `Proposal for ${bizName}`,
+          clientExecutiveSummary: '',
+          items: amount > 0 ? [{
+            id: `item_${Date.now().toString(36)}`,
+            title: 'Project Scope',
+            description: 'As discussed.',
+            itemType: 'CUSTOM_DESIGN',
+            deliverables: [],
+            fixedPriceUSD: amount,
+            estimatedHours: 0,
+          }] : [],
+          subtotalUSD: amount,
+          totalUSD: amount,
+          validUntil: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
+          status: 'DRAFT',
+          paymentProcessingActive: false,
+          createdAt: now.toISOString(),
+          updatedAt: now.toISOString(),
+          isDeleted: false,
+        } as Proposal);
+      }
+      setSelectedPropId(proposal.id);
+      setIsCreateOpen(false);
+      setCreateBusinessId('');
+      setCreateTitle('');
+      setCreateAmount('45000');
+      setRefreshKey((prev) => prev + 1);
+    } catch (e) {
+      setCreateError(e instanceof Error ? e.message : 'Failed to create the proposal.');
+    } finally {
+      setIsCreating(false);
+    }
+  };
 
   const startEditPricing = () => {
     if (!selectedProp) return;
@@ -94,6 +167,13 @@ export const ProposalsPage: React.FC = () => {
         </div>
 
         <div className="flex items-center space-x-2">
+          <button
+            onClick={() => setIsCreateOpen(true)}
+            className="inline-flex items-center space-x-1.5 px-3.5 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold shadow-xs transition-colors cursor-pointer"
+          >
+            <Plus className="w-4 h-4" />
+            <span>New Proposal</span>
+          </button>
           <span className="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs font-semibold">
             <Lock className="w-3.5 h-3.5" />
             <span>Payment Processing Locked</span>
@@ -115,6 +195,47 @@ export const ProposalsPage: React.FC = () => {
         </p>
       </div>
 
+      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 items-start">
+        {/* Proposal list sidebar */}
+        <div className="lg:col-span-1 bg-white border border-slate-200 rounded-xl p-4 shadow-xs space-y-2 max-h-[70vh] overflow-y-auto">
+          <div className="text-xs font-bold text-slate-700 uppercase tracking-wider px-1">
+            All Proposals ({proposals.length})
+          </div>
+          {proposals.length === 0 && (
+            <p className="text-[11px] text-slate-500 px-1">No proposals yet.</p>
+          )}
+          {proposals.map((p) => {
+            const isActive = p.id === selectedProp?.id;
+            const biz = businessService.getById(p.businessId);
+            const bizName = biz?.crm.verifiedBusinessName || biz?.external.tradeName || 'Unknown client';
+            return (
+              <button
+                key={p.id}
+                onClick={() => { setSelectedPropId(p.id); setIsEditingPricing(false); }}
+                className={`w-full text-left p-3 rounded-lg border transition-colors cursor-pointer ${
+                  isActive
+                    ? 'bg-slate-900 text-white border-slate-900'
+                    : 'bg-slate-50 border-slate-200 hover:bg-slate-100 text-slate-900'
+                }`}
+              >
+                <div className="text-xs font-bold truncate">{p.title}</div>
+                <div className={`text-[10px] truncate mt-0.5 ${isActive ? 'text-slate-300' : 'text-slate-500'}`}>
+                  {bizName}
+                </div>
+                <div className="flex items-center justify-between mt-1.5">
+                  <span className={`text-[10px] font-mono font-bold ${isActive ? 'text-amber-300' : 'text-slate-500'}`}>
+                    {p.proposalNumber}
+                  </span>
+                  <span className={`text-[10px] font-bold ${isActive ? 'text-slate-200' : 'text-slate-600'}`}>
+                    {formatPHP(p.totalUSD)}
+                  </span>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="lg:col-span-3 space-y-6 min-w-0">
       {/* Proposal Scope View */}
       {selectedProp && (
         <div className="bg-white border border-slate-200 rounded-xl p-6 sm:p-8 space-y-6 shadow-xs">
@@ -324,8 +445,104 @@ export const ProposalsPage: React.FC = () => {
           <FileText className="w-12 h-12 mx-auto text-slate-400" />
           <h3 className="text-sm font-semibold text-slate-800">No Proposals Drafted Yet</h3>
           <p className="text-xs text-slate-500 max-w-md mx-auto">
-            Proposals are drafted directly from qualified leads in the Leads Workspace after reviewing audit findings and business needs.
+            Create one with the New Proposal button above, or generate an AI draft from a qualified lead.
           </p>
+          <button
+            onClick={() => setIsCreateOpen(true)}
+            className="inline-flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition-colors cursor-pointer"
+          >
+            <Plus className="w-4 h-4" />
+            <span>New Proposal</span>
+          </button>
+        </div>
+      )}
+        </div>
+      </div>
+
+      {/* New Proposal creation modal */}
+      {isCreateOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="new-proposal-title">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 space-y-4">
+            <div>
+              <h3 id="new-proposal-title" className="text-sm font-bold text-slate-900">New Proposal</h3>
+              <p className="text-xs text-slate-500 mt-1">Pick a business, then generate an AI draft or start from a blank proposal.</p>
+            </div>
+
+            <div>
+              <label htmlFor="np-business" className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-1.5">
+                Business
+              </label>
+              <select
+                id="np-business"
+                value={createBusinessId}
+                onChange={(e) => setCreateBusinessId(e.target.value)}
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-slate-900"
+              >
+                <option value="">Select a business…</option>
+                {qualifiedBusinesses.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.crm.verifiedBusinessName || b.external.tradeName}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label htmlFor="np-title" className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-1.5">
+                Title <span className="text-slate-400 font-medium normal-case">(optional)</span>
+              </label>
+              <input
+                id="np-title"
+                type="text"
+                value={createTitle}
+                onChange={(e) => setCreateTitle(e.target.value)}
+                placeholder="e.g. Website Redesign for Acme Corp"
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-slate-900"
+              />
+            </div>
+
+            <div>
+              <label htmlFor="np-amount" className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-1.5">
+                Starting Amount (PHP) <span className="text-slate-400 font-medium normal-case">— blank proposals only</span>
+              </label>
+              <input
+                id="np-amount"
+                type="number"
+                min={0}
+                value={createAmount}
+                onChange={(e) => setCreateAmount(e.target.value)}
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-slate-900"
+              />
+            </div>
+
+            {createError && (
+              <p className="text-xs text-rose-600 font-medium" role="alert">{createError}</p>
+            )}
+
+            <div className="flex items-center justify-end space-x-2 pt-1">
+              <button
+                onClick={() => { setIsCreateOpen(false); setCreateError(null); }}
+                disabled={isCreating}
+                className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 text-xs font-semibold hover:bg-slate-50 transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => handleCreateProposal('blank')}
+                disabled={isCreating || !createBusinessId}
+                className="px-4 py-2 rounded-lg border border-slate-900 text-slate-900 text-xs font-bold hover:bg-slate-100 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {isCreating ? 'Creating…' : 'Blank Proposal'}
+              </button>
+              <button
+                onClick={() => handleCreateProposal('ai')}
+                disabled={isCreating || !createBusinessId}
+                className="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {isCreating ? 'Generating…' : 'Generate AI Draft'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

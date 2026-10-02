@@ -58,17 +58,36 @@ export const OutreachPage: React.FC = () => {
     });
 
     if (approved) {
+      // Record a REAL outreach activity on the lead so the pipeline reflects
+      // what happened (previously this only wrote an audit log entry).
+      const lead = leadService.getByBusinessId(activeBiz.id);
+      if (lead) {
+        leadService.addOutreach({
+          businessId: activeBiz.id,
+          leadId: lead.id,
+          channel: 'EMAIL',
+          messageBody: `Subject: ${draftSubject}\n\n${draftMessage}`,
+          subject: draftSubject,
+          status: 'READY_FOR_MANUAL_SEND',
+          outcomeNotes: 'Approved via human approval gate; awaiting manual send.',
+          nextAction: 'Send the message manually, then mark as COMPLETED.',
+        });
+      }
       auditService.log({
         actorId: 'operator_session',
         actorType: 'USER',
         action: 'SENT_MESSAGE',
         entityType: 'Lead',
         entityId: activeBiz.id,
-        changeSummary: `Operator approved and dispatched outbound communication to ${bizName}`,
+        changeSummary: `Operator approved outbound communication to ${bizName} and logged it to the lead outreach history.`,
         severity: 'MEDIUM',
       });
-      setNotification(`Message dispatched successfully to ${bizName}.`);
-      setTimeout(() => setNotification(null), 5000);
+      setNotification(
+        lead
+          ? `Outreach approved and logged to ${bizName}'s history. Send it manually, then mark it completed.`
+          : `Outreach approved for ${bizName}. No lead record exists yet — import the business as a lead first.`
+      );
+      setTimeout(() => setNotification(null), 6000);
     }
   };
 
@@ -84,17 +103,38 @@ export const OutreachPage: React.FC = () => {
     });
 
     if (approved) {
+      // Queue a REAL outreach activity per qualified lead (previously audit-only).
+      let queued = 0;
+      for (const biz of qualifiedLeads) {
+        const lead = leadService.getByBusinessId(biz.id);
+        if (!lead) continue;
+        const bizName = biz.crm.verifiedBusinessName || biz.external.tradeName || 'Prospect';
+        leadService.addOutreach({
+          businessId: biz.id,
+          leadId: lead.id,
+          channel: 'EMAIL',
+          messageBody: `Bulk outreach queued for ${bizName} — draft and send manually.`,
+          status: 'READY_FOR_MANUAL_SEND',
+          outcomeNotes: 'Queued via approved bulk outreach batch.',
+          nextAction: 'Draft a personalized message and send manually.',
+        });
+        queued++;
+      }
       auditService.log({
         actorId: 'operator_session',
         actorType: 'USER',
         action: 'BATCH_OUTREACH_QUEUED',
         entityType: 'Lead',
         entityId: 'bulk_batch',
-        changeSummary: `Human approval confirmed bulk outreach queue for ${count} leads.`,
+        changeSummary: `Human approval confirmed bulk outreach queue for ${count} leads; ${queued} outreach records created.`,
         severity: 'HIGH',
       });
-      setNotification(`Bulk outreach queue approved for ${count} qualified prospects.`);
-      setTimeout(() => setNotification(null), 5000);
+      setNotification(
+        queued > 0
+          ? `Bulk outreach approved — ${queued} outreach records queued for manual sending.`
+          : `Bulk outreach approved, but no qualified leads have lead records yet. Import them as leads first.`
+      );
+      setTimeout(() => setNotification(null), 6000);
     }
   };
 

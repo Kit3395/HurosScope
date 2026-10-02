@@ -19,6 +19,7 @@ import {
   normalizePhoneNumber,
   normalizeWebsiteDomain,
 } from '../utils';
+import { apiFetch } from './api';
 
 class DiscoveryService {
   private lastSearchTimestamp: number = 0;
@@ -29,7 +30,7 @@ class DiscoveryService {
    */
   public async getApiStatus(): Promise<DiscoveryApiStatus> {
     try {
-      const response = await fetch('/api/discovery/status');
+      const response = await apiFetch('/api/discovery/status');
       if (!response.ok) {
         throw new Error(`Status check returned ${response.status}`);
       }
@@ -93,7 +94,7 @@ class DiscoveryService {
       simulateError: options?.simulateError,
     };
 
-    const response = await fetch('/api/discovery/search', {
+    const response = await apiFetch('/api/discovery/search', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

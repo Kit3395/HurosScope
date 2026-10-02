@@ -11,7 +11,7 @@
 import { UserAccount, UserAccessRequest, UserRole, UserAccountStatus } from '../types';
 import { auditService } from '../audit';
 import { GoogleUserProfile } from '../security/googleAuth';
-import { apiGet, apiPost, apiPut, apiDelete, getAuthToken, setAuthToken } from './api';
+import { apiGet, apiPost, apiPut, apiDelete } from './api';
 
 class UserAccessService {
   private users: UserAccount[] = [];
@@ -45,7 +45,7 @@ class UserAccessService {
    * keeps whatever it already had.
    */
   public async syncFromServer(): Promise<void> {
-    if (typeof window === 'undefined' || !getAuthToken()) return;
+    if (typeof window === 'undefined') return;
     let changed = false;
     try {
       const users = await apiGet<UserAccount[]>('/api/users');
@@ -217,36 +217,6 @@ class UserAccessService {
   }
 
   /**
-   * Owner/admin password set (no current-password check). Self-service
-   * changes should use changePassword instead.
-   */
-  public async setPassword(
-    userIdOrEmail: string,
-    newPassword: string,
-    operatorId: string = 'user_self'
-  ): Promise<{ success: boolean; error?: string }> {
-    const user =
-      this.users.find((u) => u.id === userIdOrEmail) ||
-      this.getUserByEmail(userIdOrEmail);
-    if (!user) return { success: false, error: 'User account not found.' };
-    try {
-      await apiPut(`/api/users/${encodeURIComponent(user.id)}`, { password: newPassword });
-      await this.syncFromServer();
-      auditService.log({
-        actorId: operatorId,
-        actorType: 'USER',
-        action: 'CONFIGURATION_CHANGED',
-        entityType: 'SecurityGate',
-        entityId: user.id,
-        changeSummary: `Password updated for ${user.email}.`,
-      });
-      return { success: true };
-    } catch (err: any) {
-      return { success: false, error: err.message || 'Failed to update password.' };
-    }
-  }
-
-  /**
    * Self-service password change — the server verifies the current password.
    */
   public async changePassword(
@@ -256,11 +226,10 @@ class UserAccessService {
     _operatorId: string = 'user_self'
   ): Promise<{ success: boolean; error?: string }> {
     try {
-      const res = await apiPost<{ success: boolean; token: string; user: UserAccount }>(
+      const res = await apiPost<{ success: boolean; user: UserAccount }>(
         '/api/auth/change-password',
         { currentPassword: currentPasswordAttempt, newPassword }
       );
-      setAuthToken(res.token);
       await this.syncFromServer();
       auditService.log({
         actorId: res.user.id,

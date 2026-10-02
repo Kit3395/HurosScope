@@ -31,6 +31,7 @@ import { repository } from '../database';
 import { auditService } from '../audit';
 import { aiRateLimiter } from '../security';
 import { createSafeAnalyticalCritique, sanitizeAndValidateAIOutput } from '../ai';
+import { apiFetch } from './api';
 
 function generateStableId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 7)}`;
@@ -83,7 +84,7 @@ export const intelligenceService = {
 
     // Try server API first
     try {
-      const response = await fetch('/api/intelligence/audit-website', {
+      const response = await apiFetch('/api/intelligence/audit-website', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -630,7 +631,7 @@ export const intelligenceService = {
 
     // Try server API first
     try {
-      const response = await fetch('/api/intelligence/audit-social', {
+      const response = await apiFetch('/api/intelligence/audit-social', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -933,7 +934,7 @@ export const intelligenceService = {
     let scoreData: AILeadScoreData;
 
     try {
-      const response = await fetch('/api/intelligence/score-lead', {
+      const response = await apiFetch('/api/intelligence/score-lead', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1109,12 +1110,12 @@ export const intelligenceService = {
             'Social integration',
             'Basic local SEO'
           ],
-          fixedPriceUSD: 2500,
+          fixedPriceUSD: 45000,
           estimatedHours: 40
         }
       ],
-      subtotalUSD: 2500,
-      totalUSD: 2500,
+      subtotalUSD: 45000,
+      totalUSD: 45000,
       validUntil: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
       status: 'DRAFT',
       paymentProcessingActive: false,

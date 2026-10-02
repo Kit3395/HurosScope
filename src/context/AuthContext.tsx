@@ -6,16 +6,18 @@ import { userAccessService } from '../services/userAccessService';
 import { supabaseService } from '../services/supabaseService';
 import { auditService } from '../audit';
 import { GoogleUserProfile } from '../security/googleAuth';
-import { getAuthToken, setAuthToken, apiGet, apiPost } from '../services/api';
+import { apiGet, apiPost } from '../services/api';
 
 interface AuthContextType {
   currentUser: CurrentUserSession | null;
   isAuthenticated: boolean;
   isLoading: boolean;
   pendingRequestsCount: number;
+  /** Explains why the user was returned to the login gate (e.g. session expired). */
+  authNotice: string | null;
+  clearAuthNotice: () => void;
   login: (email: string, password?: string) => Promise<{ success: boolean; error?: string; remainingAttempts?: number; isLocked?: boolean }>;
   loginWithGoogle: (googleAccessToken: string) => Promise<{ success: boolean; error?: string }>;
-  updatePassword: (newPassword: string) => Promise<{ success: boolean; error?: string }>;
   connectGoogleAccount: (googleProfile: GoogleUserProfile) => Promise<{ success: boolean; error?: string }>;
   disconnectGoogleAccount: () => Promise<{ success: boolean; error?: string }>;
   logout: () => void;
@@ -37,19 +39,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [pendingRequestsCount, setPendingRequestsCount] = useState<number>(0);
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
 
   // Initialize auth state on mount — validate the stored server session.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const token = getAuthToken();
-        if (!token) {
-          setIsAuthenticated(false);
-          setCurrentUser(null);
-          return;
-        }
-        // Validate the session against the server (single source of truth).
+        // Validate the session cookie against the server (single source of truth).
         const data = await apiGet<{ success: boolean; user: UserAccount }>('/api/auth/me');
         if (cancelled) return;
         const account = data.user;
@@ -74,8 +71,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         });
         setIsAuthenticated(true);
       } catch {
-        // Invalid/expired session — drop it and show the login gate.
-        setAuthToken(null);
+        // No/invalid session — show the login gate.
         userAccessService.clearMirror();
         setIsAuthenticated(false);
         setCurrentUser(null);
@@ -92,9 +88,28 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setPendingRequestsCount(userAccessService.getPendingRequests().length);
     });
 
+    // Global 401 handling: any API call failing auth returns to the login
+    // gate with an explanation instead of failing silently per-component.
+    // Only fires the notice when there was an active session to lose.
+    const onSessionExpired = () => {
+      if (cancelled) return;
+      let hadSession = false;
+      setIsAuthenticated((prev) => {
+        hadSession = prev;
+        return false;
+      });
+      setCurrentUser(null);
+      userAccessService.clearMirror();
+      if (hadSession) {
+        setAuthNotice('Your session expired or was revoked. Please sign in again.');
+      }
+    };
+    window.addEventListener('horuscope:session-expired', onSessionExpired);
+
     return () => {
       cancelled = true;
       unsubscribe();
+      window.removeEventListener('horuscope:session-expired', onSessionExpired);
     };
   }, []);
 
@@ -103,6 +118,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     password?: string
   ): Promise<{ success: boolean; error?: string; remainingAttempts?: number; isLocked?: boolean }> => {
     setIsLoading(true);
+    setAuthNotice(null);
     try {
       const cleanEmail = email.trim().toLowerCase();
 
@@ -194,14 +210,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       // Server validates the Google token with Google and mints a session
       // only for a pre-approved, linked account.
-      const data = await apiPost<{ success: boolean; token: string; user: UserAccount }>(
+      const data = await apiPost<{ success: boolean; user: UserAccount }>(
         '/api/auth/google',
         { googleAccessToken }
       );
-      if (!data.success || !data.token || !data.user) {
+      if (!data.success || !data.user) {
         return { success: false, error: 'Google authentication failed.' };
       }
-      setAuthToken(data.token);
       const account = data.user;
 
       await userAccessService.syncFromServer();
@@ -243,19 +258,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } finally {
       setIsLoading(false);
     }
-  };
-
-  const updatePassword = async (newPassword: string): Promise<{ success: boolean; error?: string }> => {
-    if (!currentUser) {
-      return { success: false, error: 'No active user session.' };
-    }
-    const res = await userAccessService.setPassword(currentUser.userId, newPassword, currentUser.userId);
-    if (res.success) {
-      const updatedUser = userAccessService.getUserById(currentUser.userId);
-      if (updatedUser) {
-      }
-    }
-    return res;
   };
 
   const connectGoogleAccount = async (
@@ -312,6 +314,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     userAccessService.clearMirror();
     setCurrentUser(null);
     setIsAuthenticated(false);
+    setAuthNotice(null);
   };
 
   const requestAccess = async (data: {
@@ -333,12 +336,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // OWNER-only session impersonation, mediated by the server (no client-side bypass).
   const switchUserAccount = async (userId: string) => {
     try {
-      const data = await apiPost<{ success: boolean; token: string; user: UserAccount }>(
+      const data = await apiPost<{ success: boolean; user: UserAccount }>(
         '/api/auth/impersonate',
         { userId }
       );
-      if (!data.success || !data.token || !data.user) return;
-      setAuthToken(data.token);
+      if (!data.success || !data.user) return;
       const user = data.user;
       await userAccessService.syncFromServer();
       if (!userAccessService.getUserById(user.id)) {
@@ -374,9 +376,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isAuthenticated,
         isLoading,
         pendingRequestsCount,
+        authNotice,
+        clearAuthNotice: () => setAuthNotice(null),
         login,
         loginWithGoogle,
-        updatePassword,
         connectGoogleAccount,
         disconnectGoogleAccount,
         logout,

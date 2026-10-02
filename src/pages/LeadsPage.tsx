@@ -31,6 +31,7 @@ import { PipelineStatusBadge } from '../components/PipelineStatusBadge';
 import { ActionConfirmationModal } from '../components/ActionConfirmationModal';
 import { BulkActionModal } from '../components/BulkActionModal';
 import { LeadDetailPanel } from '../components/LeadDetailPanel';
+import { QuickAddLeadModal } from '../components/crm/QuickAddLeadModal';
 import { PipelineLifecycleBanner } from '../components/PipelineLifecycleBanner';
 
 interface LeadsPageProps {
@@ -75,6 +76,7 @@ export const LeadsPage: React.FC<LeadsPageProps> = ({
   const [mergeSecondaryId, setMergeSecondaryId] = useState<string>('');
 
   const [importModalOpen, setImportModalOpen] = useState(false);
+  const [quickAddOpen, setQuickAddOpen] = useState(false);
   const [importText, setImportText] = useState(
     'Beacon Hill Dental, https://beaconhilldental.com, +1 215-555-0811, Center City practice\nIndependence Law Group, https://independencelaw.com, +1 215-555-0922, Corporate legal firm'
   );
@@ -213,22 +215,73 @@ export const LeadsPage: React.FC<LeadsPageProps> = ({
     refreshAll();
   };
 
-  // Import Leads
+  const [importResult, setImportResult] = useState<{ imported: number; skipped: number; errors: string[] } | null>(null);
+
+  // Parse one CSV line honoring quoted fields (so "Acme, Inc." stays together).
+  const parseCsvLine = (line: string): string[] => {
+    const fields: string[] = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (inQuotes) {
+        if (ch === '"') {
+          if (line[i + 1] === '"') { current += '"'; i++; }
+          else inQuotes = false;
+        } else {
+          current += ch;
+        }
+      } else if (ch === '"') {
+        inQuotes = true;
+      } else if (ch === ',') {
+        fields.push(current.trim());
+        current = '';
+      } else {
+        current += ch;
+      }
+    }
+    fields.push(current.trim());
+    return fields;
+  };
+
+  // Import Leads — validates rows and reports what happened.
   const handleConfirmImport = () => {
     const lines = importText.split('\n').map((l) => l.trim()).filter(Boolean);
-    const parsedRecords = lines.map((line) => {
-      const parts = line.split(',').map((p) => p.trim());
-      return {
-        name: parts[0] || 'Imported Prospect',
-        website: parts[1] || '',
-        phone: parts[2] || '',
-        notes: parts[3] || 'Imported batch prospect',
+    const errors: string[] = [];
+    const parsedRecords: Array<{ name: string; website: string; phone: string; notes: string; pipelineStatus: LeadPipelineStatus }> = [];
+
+    lines.forEach((line, idx) => {
+      const parts = parseCsvLine(line);
+      const name = (parts[0] || '').trim();
+      const website = (parts[1] || '').trim();
+      if (!name) {
+        errors.push(`Line ${idx + 1}: missing business name — skipped.`);
+        return;
+      }
+      if (website && !/^(https?:\/\/)?[\w.-]+\.[a-z]{2,}(\/.*)?$/i.test(website)) {
+        errors.push(`Line ${idx + 1}: "${website}" doesn't look like a website — imported without it.`);
+      }
+      parsedRecords.push({
+        name,
+        website: website && /^(https?:\/\/)?[\w.-]+\.[a-z]{2,}(\/.*)?$/i.test(website) ? website : '',
+        phone: (parts[2] || '').trim(),
+        notes: (parts[3] || 'Imported batch prospect').trim(),
         pipelineStatus: 'New' as LeadPipelineStatus,
-      };
+      });
     });
 
-    leadService.import(parsedRecords);
+    const before = leadService.getAll(false, true).length;
+    if (parsedRecords.length > 0) {
+      leadService.import(parsedRecords);
+    }
+    const after = leadService.getAll(false, true).length;
+    setImportResult({
+      imported: after - before,
+      skipped: lines.length - parsedRecords.length,
+      errors,
+    });
     setImportModalOpen(false);
+    setImportText('');
     refreshAll();
   };
 
@@ -274,8 +327,39 @@ export const LeadsPage: React.FC<LeadsPageProps> = ({
           </p>
         </div>
 
+        {/* Import result feedback */}
+        {importResult && (
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3.5 flex items-start space-x-3" role="status">
+            <CheckCircle className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+            <div className="flex-1 text-xs text-emerald-900">
+              <span className="font-bold">Import complete:</span> {importResult.imported} imported
+              {importResult.skipped > 0 && `, ${importResult.skipped} skipped`}.
+              {importResult.errors.length > 0 && (
+                <ul className="mt-1.5 space-y-0.5 text-[11px] text-emerald-800">
+                  {importResult.errors.slice(0, 5).map((e, i) => <li key={i}>• {e}</li>)}
+                  {importResult.errors.length > 5 && <li>• …and {importResult.errors.length - 5} more.</li>}
+                </ul>
+              )}
+            </div>
+            <button
+              onClick={() => setImportResult(null)}
+              aria-label="Dismiss import results"
+              className="text-emerald-600 hover:text-emerald-900 shrink-0"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
         {/* Global Action Buttons */}
         <div className="flex items-center flex-wrap gap-2 text-xs">
+          <button
+            onClick={() => setQuickAddOpen(true)}
+            className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white flex items-center space-x-1.5 transition-colors cursor-pointer shadow-xs font-semibold"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>New Lead</span>
+          </button>
           <button
             onClick={() => setImportModalOpen(true)}
             className="px-3.5 py-2 rounded-xl bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 hover:text-slate-900 flex items-center space-x-1.5 transition-colors cursor-pointer shadow-xs font-semibold"
@@ -459,7 +543,16 @@ export const LeadsPage: React.FC<LeadsPageProps> = ({
                 return (
                   <div
                     key={lead.id}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`Select lead ${bizName}`}
                     onClick={() => setActiveLeadId(lead.id)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        setActiveLeadId(lead.id);
+                      }
+                    }}
                     className={`p-3.5 rounded-xl border transition-all cursor-pointer space-y-2.5 group ${
                       isSelected
                         ? 'bg-blue-50/70 border-blue-500 shadow-md ring-1 ring-blue-500/30'
@@ -736,6 +829,19 @@ export const LeadsPage: React.FC<LeadsPageProps> = ({
       )}
 
       {/* 6. Import Leads Modal */}
+      {quickAddOpen && (
+        <QuickAddLeadModal
+          initialStage="New"
+          isOpen={quickAddOpen}
+          onClose={() => setQuickAddOpen(false)}
+          onCreated={(newLeadId) => {
+            setQuickAddOpen(false);
+            refreshAll();
+            setActiveLeadId(newLeadId);
+          }}
+        />
+      )}
+
       {importModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
           <div className="bg-slate-900 border border-slate-700 rounded-xl max-w-lg w-full p-6 shadow-2xl space-y-4">

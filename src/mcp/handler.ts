@@ -29,9 +29,16 @@ export type ToolExecutorFunction = (
 
 export class MCPHandler {
   private customExecutors = new Map<string, ToolExecutorFunction>();
+  /** Optional server-injected provider for the access-request queue resource. */
+  private accessRequestsProvider: (() => unknown[]) | null = null;
 
   constructor() {
     this.registerDefaultExecutors();
+  }
+
+  /** Server sets this so `horusscope://access/requests` returns the real queue. */
+  public setAccessRequestsProvider(provider: () => unknown[]): void {
+    this.accessRequestsProvider = provider;
   }
 
   /**
@@ -325,11 +332,13 @@ export class MCPHandler {
       }
 
       case 'horusscope://access/requests': {
+        const queue = this.accessRequestsProvider ? this.accessRequestsProvider() : [];
         return {
           uri,
           mimeType: 'application/json',
           text: JSON.stringify({
-            message: 'Access requests queue synced with server and local storage vault.',
+            total: queue.length,
+            requests: queue,
             timestamp: new Date().toISOString(),
           }, null, 2),
         };
