@@ -6,6 +6,20 @@ import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { mcpHandler, mcpGovernance, MCP_REGISTERED_TOOLS, MCP_REGISTERED_RESOURCES } from './src/mcp/index.ts';
+import { createSnapshotStore, SnapshotStore } from './server/store.ts';
+import {
+  hashPassword,
+  generateSalt,
+  verifyPassword,
+  COMPROMISED_DEFAULT_HASH,
+  createSession,
+  getSession,
+  revokeSession,
+  revokeSessionsForUser,
+  requireAuth,
+  requireOwner,
+  AuthenticatedRequest,
+} from './server/auth.ts';
 
 // Lazy initialized Supabase Admin Client using Secret Key for secure server-side operations
 let supabaseAdminClient: SupabaseClient | null = null;
@@ -14,7 +28,7 @@ function getSupabaseAdminClient(): SupabaseClient | null {
     const url =
       process.env.SUPABASE_URL ||
       process.env.VITE_SUPABASE_URL ||
-      'https://jnrgvkbmodcbwpteicoc.supabase.co';
+      '';
     const secretKey =
       process.env.SUPABASE_SECRET_KEY ||
       process.env.SUPABASE_SERVICE_ROLE_KEY ||
@@ -53,7 +67,7 @@ function getGeminiClient(): GoogleGenAI | null {
   return geminiClient;
 }
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 const app = express();
 
 app.use(express.json());
@@ -99,6 +113,233 @@ app.get('/api/health', (req: Request, res: Response) => {
   });
 });
 
+// ============================================================================
+// AUTHENTICATION — server-side credential verification + Bearer sessions.
+// Public: POST /api/auth/login. Everything else under /api requires auth.
+// ============================================================================
+
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOCKOUT_MINUTES = 15;
+
+app.post('/api/auth/login', async (req: Request, res: Response) => {
+  const { email, password } = req.body || {};
+  const cleanEmail = String(email || '').trim().toLowerCase();
+
+  if (!cleanEmail || !password) {
+    return res.status(400).json({ error: 'INVALID_REQUEST', message: 'Email and password are required.' });
+  }
+
+  const user = readUsers().find((u) => u.email.toLowerCase() === cleanEmail);
+  // Uniform failure — do not reveal whether the email exists.
+  const fail = (msg: string, extra: Record<string, unknown> = {}) =>
+    res.status(401).json({ error: 'INVALID_CREDENTIALS', message: msg, ...extra });
+
+  if (!user || user.status !== 'APPROVED') {
+    return fail('Invalid email or password.');
+  }
+
+  if (user.lockoutUntil) {
+    const lockDate = new Date(user.lockoutUntil);
+    if (lockDate.getTime() > Date.now()) {
+      const mins = Math.ceil((lockDate.getTime() - Date.now()) / 60000);
+      return fail(`Account is temporarily locked. Try again in ${mins} minute${mins === 1 ? '' : 's'}.`, {
+        isLocked: true,
+      });
+    }
+    user.lockoutUntil = null;
+    user.failedLoginAttempts = 0;
+  }
+
+  if (!user.isPasswordSet || !user.passwordHash || !user.passwordSalt) {
+    return fail('This account has no password configured. Contact an administrator.');
+  }
+
+  const ok = await verifyPassword(String(password), user.passwordSalt, user.passwordHash);
+  if (!ok) {
+    const attempts = (user.failedLoginAttempts || 0) + 1;
+    user.failedLoginAttempts = attempts;
+    user.updatedAt = new Date().toISOString();
+    if (attempts >= MAX_LOGIN_ATTEMPTS) {
+      user.lockoutUntil = new Date(Date.now() + LOCKOUT_MINUTES * 60000).toISOString();
+      persistData();
+      return fail(
+        `Account locked after ${MAX_LOGIN_ATTEMPTS} failed attempts. Try again in ${LOCKOUT_MINUTES} minutes.`,
+        { isLocked: true }
+      );
+    }
+    persistData();
+    return fail('Invalid email or password.', {
+      remainingAttempts: Math.max(0, MAX_LOGIN_ATTEMPTS - attempts),
+    });
+  }
+
+  user.failedLoginAttempts = 0;
+  user.lockoutUntil = null;
+  user.lastLoginAt = new Date().toISOString();
+  user.updatedAt = new Date().toISOString();
+  persistData();
+
+  const session = createSession(user.id, user.email, user.role);
+  return res.json({ success: true, token: session.token, user: toSafeUser(user) });
+});
+
+app.post('/api/auth/logout', (req: Request, res: Response) => {
+  const header = req.headers.authorization || '';
+  const match = header.match(/^Bearer\s+(.+)$/i);
+  revokeSession(match ? match[1].trim() : null);
+  res.json({ success: true });
+});
+
+/**
+ * Google OAuth login — PUBLIC. The client sends the Google access token it
+ * obtained via Google Identity Services; the server validates it directly
+ * with Google, then mints a session ONLY for a pre-approved user whose
+ * account email matches the verified Google email (or a linked googleEmail).
+ */
+app.post('/api/auth/google', async (req: Request, res: Response) => {
+  const { googleAccessToken } = req.body || {};
+  if (!googleAccessToken || typeof googleAccessToken !== 'string') {
+    return res.status(400).json({ error: 'INVALID_REQUEST', message: 'Google access token is required.' });
+  }
+
+  let profile: { sub?: string; email?: string; email_verified?: boolean; name?: string; picture?: string };
+  try {
+    const giRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { Authorization: `Bearer ${googleAccessToken}` },
+    });
+    if (!giRes.ok) {
+      return res.status(401).json({ error: 'INVALID_CREDENTIALS', message: 'Google token rejected.' });
+    }
+    profile = (await giRes.json()) as typeof profile;
+  } catch {
+    return res.status(502).json({ error: 'GOOGLE_UNREACHABLE', message: 'Could not verify Google token.' });
+  }
+
+  const email = String(profile.email || '').trim().toLowerCase();
+  if (!email || profile.email_verified === false) {
+    return res.status(401).json({ error: 'INVALID_CREDENTIALS', message: 'Google email not verified.' });
+  }
+
+  const users = readUsers();
+  const user = users.find(
+    (u) =>
+      (u.email.toLowerCase() === email || (u.googleEmail || '').toLowerCase() === email) &&
+      u.status === 'APPROVED'
+  );
+  if (!user) {
+    return res.status(403).json({
+      error: 'NOT_APPROVED',
+      message: `No approved HORUSCOPE account found for ${email}. Access requires an approved identity.`,
+    });
+  }
+
+  // Link the Google identity to the account on first successful use.
+  user.isGoogleConnected = true;
+  user.googleEmail = email;
+  user.lastLoginAt = new Date().toISOString();
+  user.updatedAt = new Date().toISOString();
+  user.failedLoginAttempts = 0;
+  user.lockoutUntil = null;
+  persistData();
+
+  const session = createSession(user.id, user.email, user.role);
+  const safe = toSafeUser(user);
+  return res.json({
+    success: true,
+    token: session.token,
+    user: { ...safe, avatarUrl: profile.picture || safe.avatarUrl },
+  });
+});
+
+// Submit access request — PUBLIC by design (pre-auth onboarding).
+// 2. POST submit new access request
+app.post('/api/access-requests', (req: Request, res: Response) => {
+  const { email, fullName, organization, requestedRole, reason } = req.body || {};
+  if (!email || !fullName) {
+    return res.status(400).json({ error: 'Email and Full Name are required.' });
+  }
+
+  const cleanEmail = String(email).trim().toLowerCase();
+  const requests = readAccessRequests();
+
+  // Check if pending request already exists
+  const existingPending = requests.find(
+    (r) => r.email.toLowerCase() === cleanEmail && r.status === 'PENDING'
+  );
+  if (existingPending) {
+    return res.json({
+      success: true,
+      message: 'An access request for this email is already awaiting administrator review.',
+      request: existingPending,
+      alreadyExisted: true,
+    });
+  }
+
+  const newReq: StoredAccessRequest = {
+    id: `req_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+    email: cleanEmail,
+    fullName: String(fullName).trim(),
+    organization: organization ? String(organization).trim() : undefined,
+    requestedRole: requestedRole || 'OPERATOR',
+    reason: reason ? String(reason).trim() : 'Authorized workspace operator request',
+    status: 'PENDING',
+    submittedAt: new Date().toISOString(),
+  };
+
+  requests.unshift(newReq);
+  writeAccessRequests(requests);
+
+  return res.status(201).json({
+    success: true,
+    message: 'Access request successfully registered and queued for administrator approval.',
+    request: newReq,
+  });
+});
+
+// ---- Everything below requires a valid Bearer session. ----
+app.use('/api', requireAuth);
+
+app.get('/api/auth/me', (req: AuthenticatedRequest, res: Response) => {
+  const user = readUsers().find((u) => u.id === req.session!.userId);
+  if (!user || user.status !== 'APPROVED') {
+    return res.status(401).json({ error: 'UNAUTHORIZED', message: 'Session user no longer active.' });
+  }
+  res.json({ success: true, user: toSafeUser(user) });
+});
+
+// OWNER-only session impersonation (replaces the old client-side perspective switch).
+app.post('/api/auth/impersonate', requireOwner, (req: AuthenticatedRequest, res: Response) => {
+  const { userId } = req.body || {};
+  const target = readUsers().find((u) => u.id === String(userId || ''));
+  if (!target || target.status !== 'APPROVED') {
+    return res.status(404).json({ error: 'NOT_FOUND', message: 'Target user not found or not approved.' });
+  }
+  const session = createSession(target.id, target.email, target.role);
+  res.json({ success: true, token: session.token, user: toSafeUser(target) });
+});
+
+// Change own password (verifies current password server-side).
+app.post('/api/auth/change-password', (req: AuthenticatedRequest, res: Response) => {
+  const { currentPassword, newPassword } = req.body || {};
+  const user = readUsers().find((u) => u.id === req.session!.userId);
+  if (!user) return res.status(404).json({ error: 'NOT_FOUND', message: 'User not found.' });
+  if (!currentPassword || !newPassword || String(newPassword).length < 8) {
+    return res.status(400).json({ error: 'INVALID_REQUEST', message: 'Current password and a new password (min 8 chars) are required.' });
+  }
+  return (async () => {
+    const ok = await verifyPassword(String(currentPassword), user.passwordSalt || '', user.passwordHash || '');
+    if (!ok) return res.status(401).json({ error: 'INVALID_CREDENTIALS', message: 'Current password is incorrect.' });
+    user.passwordSalt = generateSalt();
+    user.passwordHash = await hashPassword(String(newPassword), user.passwordSalt);
+    user.isPasswordSet = true;
+    user.updatedAt = new Date().toISOString();
+    persistData();
+    revokeSessionsForUser(user.id);
+    const session = createSession(user.id, user.email, user.role);
+    res.json({ success: true, token: session.token, user: toSafeUser(user) });
+  })();
+});
+
 // 2. System Health detailed status
 app.get('/api/system/health', (req: Request, res: Response) => {
   res.json({
@@ -108,7 +349,7 @@ app.get('/api/system/health', (req: Request, res: Response) => {
       ? 'ADMIN_SERVICE_CONNECTED'
       : 'CONNECTED',
     supabaseUrl:
-      process.env.SUPABASE_URL || 'https://jnrgvkbmodcbwpteicoc.supabase.co',
+      process.env.SUPABASE_URL || '',
     hasSecretKey: Boolean(process.env.SUPABASE_SECRET_KEY),
     aiStatus: process.env.GEMINI_API_KEY ? 'AVAILABLE' : 'KEY_MISSING',
     googlePlacesStatus: process.env.GOOGLE_MAPS_API_KEY ? 'CONFIGURED' : 'KEY_NOT_SET_SANDBOX_READY',
@@ -134,7 +375,7 @@ app.get('/api/supabase/status', async (req: Request, res: Response) => {
   const url =
     process.env.SUPABASE_URL ||
     process.env.VITE_SUPABASE_URL ||
-    'https://jnrgvkbmodcbwpteicoc.supabase.co';
+    '';
   const hasPublishableKey = Boolean(
     process.env.SUPABASE_PUBLISHABLE_KEY ||
       process.env.VITE_SUPABASE_ANON_KEY ||
@@ -1565,184 +1806,175 @@ interface StoredUserAccount {
   approvedAt?: string;
 }
 
-const ACCESS_REQUESTS_FILE = path.join(DATA_DIR, 'access_requests.json');
-const USERS_FILE = path.join(DATA_DIR, 'users.json');
+// ============================================================================
+// DURABLE DATA LAYER — server-side user registry & access requests.
+// Backed by a SnapshotStore (Turso when TURSO_DATABASE_URL + TURSO_AUTH_TOKEN
+// are set, otherwise a local JSON file). In-memory cache is authoritative
+// during runtime; every mutation persists the whole snapshot.
+// ============================================================================
 
-function ensureDataFiles() {
-  try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-
-    if (!fs.existsSync(ACCESS_REQUESTS_FILE)) {
-      // Pre-seed with Kit G's pending access request as captured in screenshot
-      const initialRequests: StoredAccessRequest[] = [
-        {
-          id: 'req_kit_g3nity',
-          email: 'kit.g3nity@gmail.com',
-          fullName: 'Kit G',
-          organization: 'TEst',
-          requestedRole: 'OPERATOR',
-          reason: 'test',
-          status: 'PENDING',
-          submittedAt: new Date().toISOString(),
-        },
-      ];
-      fs.writeFileSync(ACCESS_REQUESTS_FILE, JSON.stringify(initialRequests, null, 2));
-    } else {
-      // Ensure Kit G is present if file already exists
-      try {
-        const existing = JSON.parse(fs.readFileSync(ACCESS_REQUESTS_FILE, 'utf8'));
-        if (Array.isArray(existing)) {
-          const hasKit = existing.some(
-            (r: StoredAccessRequest) => r.email?.toLowerCase() === 'kit.g3nity@gmail.com'
-          );
-          if (!hasKit) {
-            existing.unshift({
-              id: 'req_kit_g3nity',
-              email: 'kit.g3nity@gmail.com',
-              fullName: 'Kit G',
-              organization: 'TEst',
-              requestedRole: 'OPERATOR',
-              reason: 'test',
-              status: 'PENDING',
-              submittedAt: new Date().toISOString(),
-            });
-            fs.writeFileSync(ACCESS_REQUESTS_FILE, JSON.stringify(existing, null, 2));
-          }
-        }
-      } catch {
-        // ignore parse error
-      }
-    }
-
-    if (!fs.existsSync(USERS_FILE)) {
-      const initialUsers: StoredUserAccount[] = [
-        {
-          id: 'usr_owner_kieth',
-          email: 'kiethryangonzales@gmail.com',
-          displayName: 'Kieth Ryan Gonzales',
-          role: 'OWNER',
-          status: 'APPROVED',
-          organization: 'HORUSCOPE Sovereign Operations',
-          avatarUrl: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=100&auto=format&fit=crop&q=80',
-          passwordSalt: 'horus_salt_kieth_owner_2026',
-          passwordHash: 'c3fd23514a9c3b03255bbc3a5cb1c01d21c5746778db75c41c467f454c6d87f5',
-          isPasswordSet: true,
-          failedLoginAttempts: 0,
-          lockoutUntil: null,
-          isGoogleConnected: false,
-          googleEmail: 'kiethryangonzales@gmail.com',
-          createdAt: '2026-08-01T08:00:00.000Z',
-          updatedAt: '2026-09-15T08:00:00.000Z',
-          lastLoginAt: '2026-09-15T08:00:00.000Z',
-          approvedBy: 'SYSTEM_SUPERADMIN',
-          approvedAt: '2026-08-01T08:00:00.000Z',
-        },
-      ];
-      fs.writeFileSync(USERS_FILE, JSON.stringify(initialUsers, null, 2));
-    }
-  } catch (err) {
-    console.warn('Could not initialize local data storage directory:', err);
-  }
+interface DataSnapshot {
+  users: StoredUserAccount[];
+  accessRequests: StoredAccessRequest[];
 }
 
-function readAccessRequests(): StoredAccessRequest[] {
-  ensureDataFiles();
-  try {
-    if (fs.existsSync(ACCESS_REQUESTS_FILE)) {
-      return JSON.parse(fs.readFileSync(ACCESS_REQUESTS_FILE, 'utf8'));
+let snapshotStore: SnapshotStore | null = null;
+let usersCache: StoredUserAccount[] = [];
+let requestsCache: StoredAccessRequest[] = [];
+let dataStoreReady = false;
+
+function seedSnapshot(): DataSnapshot {
+  // Clean boot: exactly one OWNER account with NO password. The bootstrap
+  // secret (HORUSCOPE_OWNER_PASSWORD) sets its password on first boot.
+  // No test fixtures, no hardcoded password hashes — ever.
+  return {
+    users: [
+      {
+        id: 'usr_owner_kieth',
+        email: 'kiethryangonzales@gmail.com',
+        displayName: 'Kieth Ryan Gonzales',
+        role: 'OWNER',
+        status: 'APPROVED',
+        organization: 'HORUSCOPE Sovereign Operations',
+        avatarUrl: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=100&auto=format&fit=crop&q=80',
+        passwordSalt: '',
+        passwordHash: '',
+        isPasswordSet: false,
+        failedLoginAttempts: 0,
+        lockoutUntil: null,
+        isGoogleConnected: false,
+        googleEmail: 'kiethryangonzales@gmail.com',
+        createdAt: '2026-08-01T08:00:00.000Z',
+        updatedAt: new Date().toISOString(),
+        approvedBy: 'SYSTEM_SUPERADMIN',
+        approvedAt: '2026-08-01T08:00:00.000Z',
+      },
+    ],
+    accessRequests: [],
+  };
+}
+
+function persistData(): void {
+  if (!snapshotStore) return;
+  const json = JSON.stringify({ users: usersCache, accessRequests: requestsCache });
+  // SnapshotStore.save never throws — fire and forget is safe.
+  void snapshotStore.save(json);
+}
+
+/**
+ * Bootstrap the owner password from the HORUSCOPE_OWNER_PASSWORD secret.
+ * Applies ONLY when the owner has no usable password (never set, or still
+ * carrying the publicly-compromised default hash). Once the owner sets a
+ * real password, the secret is ignored on later boots.
+ */
+async function bootstrapOwnerPassword(): Promise<void> {
+  const bootstrap = process.env.HORUSCOPE_OWNER_PASSWORD;
+  const owner = usersCache.find((u) => u.email.toLowerCase() === 'kiethryangonzales@gmail.com');
+  if (!owner) return;
+  const needsPassword =
+    !owner.isPasswordSet ||
+    !owner.passwordHash ||
+    owner.passwordHash === COMPROMISED_DEFAULT_HASH;
+  if (!needsPassword) return;
+  if (!bootstrap || bootstrap.length < 12) {
+    console.warn(
+      '[AUTH] Owner account has no usable password and HORUSCOPE_OWNER_PASSWORD is not set (min 12 chars). Login is disabled until it is configured.'
+    );
+    owner.isPasswordSet = false;
+    owner.passwordHash = '';
+    owner.passwordSalt = '';
+    return;
+  }
+  const salt = generateSalt();
+  owner.passwordSalt = salt;
+  owner.passwordHash = await hashPassword(bootstrap, salt);
+  owner.isPasswordSet = true;
+  owner.failedLoginAttempts = 0;
+  owner.lockoutUntil = null;
+  owner.updatedAt = new Date().toISOString();
+  console.log('[AUTH] Owner password bootstrapped from HORUSCOPE_OWNER_PASSWORD.');
+  persistData();
+}
+
+async function initDataStore(): Promise<void> {
+  if (dataStoreReady) return;
+  const legacyFile = path.join(DATA_DIR, 'horuscope-data.json');
+  snapshotStore = createSnapshotStore(legacyFile);
+  const raw = await snapshotStore.load();
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as DataSnapshot;
+      usersCache = Array.isArray(parsed.users) ? parsed.users : [];
+      requestsCache = Array.isArray(parsed.accessRequests) ? parsed.accessRequests : [];
+      console.log(
+        `[STORAGE] Loaded snapshot: ${usersCache.length} users, ${requestsCache.length} access requests.`
+      );
+    } catch {
+      console.warn('[STORAGE] Snapshot parse failed — reseeding.');
+      const seed = seedSnapshot();
+      usersCache = seed.users;
+      requestsCache = seed.accessRequests;
     }
-  } catch {
-    // fallback
+  } else {
+    const seed = seedSnapshot();
+    usersCache = seed.users;
+    requestsCache = seed.accessRequests;
+    persistData();
+    console.log('[STORAGE] Seeded fresh data snapshot.');
   }
-  return [];
+  // Quarantine any account still carrying the compromised public hash.
+  let quarantined = 0;
+  for (const u of usersCache) {
+    if (u.passwordHash === COMPROMISED_DEFAULT_HASH) {
+      u.passwordHash = '';
+      u.passwordSalt = '';
+      u.isPasswordSet = false;
+      quarantined++;
+    }
+  }
+  if (quarantined > 0) {
+    console.warn(`[AUTH] Quarantined ${quarantined} account(s) carrying the compromised default hash.`);
+    persistData();
+  }
+  await bootstrapOwnerPassword();
+  dataStoreReady = true;
 }
 
-function writeAccessRequests(requests: StoredAccessRequest[]) {
-  ensureDataFiles();
-  try {
-    fs.writeFileSync(ACCESS_REQUESTS_FILE, JSON.stringify(requests, null, 2));
-  } catch (err) {
-    console.error('Failed to write access requests:', err);
-  }
-}
-
+// Synchronous accessors over the in-memory cache (routes stay synchronous).
 function readUsers(): StoredUserAccount[] {
-  ensureDataFiles();
-  try {
-    if (fs.existsSync(USERS_FILE)) {
-      return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
-    }
-  } catch {
-    // fallback
-  }
-  return [];
+  return usersCache;
+}
+function writeUsers(users: StoredUserAccount[]): void {
+  usersCache = users;
+  persistData();
+}
+function readAccessRequests(): StoredAccessRequest[] {
+  return requestsCache;
+}
+function writeAccessRequests(requests: StoredAccessRequest[]): void {
+  requestsCache = requests;
+  persistData();
 }
 
-function writeUsers(users: StoredUserAccount[]) {
-  ensureDataFiles();
-  try {
-    fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
-  } catch (err) {
-    console.error('Failed to write users:', err);
-  }
+/** Strip credential material before a user record leaves the server. */
+function toSafeUser(u: StoredUserAccount): Omit<StoredUserAccount, 'passwordSalt' | 'passwordHash'> {
+  const { passwordSalt, passwordHash, ...safe } = u;
+  return safe;
 }
 
-// 1. GET all access requests
-app.get('/api/access-requests', (req: Request, res: Response) => {
+
+// 1. GET all access requests (OWNER only)
+app.get('/api/access-requests', requireOwner, (req: AuthenticatedRequest, res: Response) => {
   const requests = readAccessRequests();
   res.json(requests);
 });
 
-// 2. POST submit new access request
-app.post('/api/access-requests', (req: Request, res: Response) => {
-  const { email, fullName, organization, requestedRole, reason } = req.body || {};
-  if (!email || !fullName) {
-    return res.status(400).json({ error: 'Email and Full Name are required.' });
-  }
 
-  const cleanEmail = String(email).trim().toLowerCase();
-  const requests = readAccessRequests();
-
-  // Check if pending request already exists
-  const existingPending = requests.find(
-    (r) => r.email.toLowerCase() === cleanEmail && r.status === 'PENDING'
-  );
-  if (existingPending) {
-    return res.json({
-      success: true,
-      message: 'An access request for this email is already awaiting administrator review.',
-      request: existingPending,
-      alreadyExisted: true,
-    });
-  }
-
-  const newReq: StoredAccessRequest = {
-    id: `req_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-    email: cleanEmail,
-    fullName: String(fullName).trim(),
-    organization: organization ? String(organization).trim() : undefined,
-    requestedRole: requestedRole || 'OPERATOR',
-    reason: reason ? String(reason).trim() : 'Authorized workspace operator request',
-    status: 'PENDING',
-    submittedAt: new Date().toISOString(),
-  };
-
-  requests.unshift(newReq);
-  writeAccessRequests(requests);
-
-  return res.status(201).json({
-    success: true,
-    message: 'Access request successfully registered and queued for administrator approval.',
-    request: newReq,
-  });
-});
-
-// 3. POST approve access request
-app.post('/api/access-requests/:id/approve', (req: Request, res: Response) => {
+// 3. POST approve access request (OWNER only)
+app.post('/api/access-requests/:id/approve', requireOwner, (req: AuthenticatedRequest, res: Response) => {
   const { id } = req.params;
-  const { assignedRole, operatorId } = req.body || {};
+  const { assignedRole } = req.body || {};
+  const operatorId = req.session!.userId;
 
   const requests = readAccessRequests();
   const targetReq = requests.find((r) => r.id === id);
@@ -1771,9 +2003,9 @@ app.post('/api/access-requests/:id/approve', (req: Request, res: Response) => {
       role,
       status: 'APPROVED',
       organization: targetReq.organization || 'HORUSCOPE Partner',
-      passwordSalt: 'horus_salt_default_user_2026',
-      passwordHash: 'c3fd23514a9c3b03255bbc3a5cb1c01d21c5746778db75c41c467f454c6d87f5',
-      isPasswordSet: true,
+      passwordSalt: '',
+      passwordHash: '',
+      isPasswordSet: false,
       failedLoginAttempts: 0,
       lockoutUntil: null,
       isGoogleConnected: false,
@@ -1799,10 +2031,11 @@ app.post('/api/access-requests/:id/approve', (req: Request, res: Response) => {
   });
 });
 
-// 4. POST reject access request
-app.post('/api/access-requests/:id/reject', (req: Request, res: Response) => {
+// 4. POST reject access request (OWNER only)
+app.post('/api/access-requests/:id/reject', requireOwner, (req: AuthenticatedRequest, res: Response) => {
   const { id } = req.params;
-  const { reason, operatorId } = req.body || {};
+  const { reason } = req.body || {};
+  const operatorId = req.session!.userId;
 
   const requests = readAccessRequests();
   const targetReq = requests.find((r) => r.id === id);
@@ -1824,8 +2057,8 @@ app.post('/api/access-requests/:id/reject', (req: Request, res: Response) => {
   });
 });
 
-// 5. GET all users
-app.get('/api/users', (req: Request, res: Response) => {
+// 5. GET all users (OWNER only)
+app.get('/api/users', requireOwner, (req: AuthenticatedRequest, res: Response) => {
   const users = readUsers();
   // Strip password hash and salt for client security
   const safeUsers = users.map((u) => {
@@ -1835,11 +2068,14 @@ app.get('/api/users', (req: Request, res: Response) => {
   res.json(safeUsers);
 });
 
-// 6. POST create user
-app.post('/api/users', (req: Request, res: Response) => {
-  const { email, displayName, role, organization, status, operatorId } = req.body || {};
+// 6. POST create user (OWNER only)
+app.post('/api/users', requireOwner, (req: AuthenticatedRequest, res: Response) => {
+  const { email, displayName, role, organization, status, password } = req.body || {};
   if (!email || !displayName) {
     return res.status(400).json({ error: 'Email and Display Name are required.' });
+  }
+  if (!password || String(password).length < 8) {
+    return res.status(400).json({ error: 'A password of at least 8 characters is required for the new user.' });
   }
 
   const cleanEmail = String(email).trim().toLowerCase();
@@ -1849,33 +2085,35 @@ app.post('/api/users', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'A user account with this email already exists.' });
   }
 
-  const newUser: StoredUserAccount = {
-    id: `usr_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-    email: cleanEmail,
-    displayName: String(displayName).trim(),
-    role: role || 'OPERATOR',
-    status: status || 'APPROVED',
-    organization: organization ? String(organization).trim() : undefined,
-    passwordSalt: 'horus_salt_default_user_2026',
-    passwordHash: 'c3fd23514a9c3b03255bbc3a5cb1c01d21c5746778db75c41c467f454c6d87f5',
-    isPasswordSet: true,
-    failedLoginAttempts: 0,
-    lockoutUntil: null,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    approvedBy: operatorId || 'admin',
-    approvedAt: new Date().toISOString(),
-  };
+  return (async () => {
+    const salt = generateSalt();
+    const newUser: StoredUserAccount = {
+      id: `usr_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      email: cleanEmail,
+      displayName: String(displayName).trim(),
+      role: role || 'OPERATOR',
+      status: status || 'APPROVED',
+      organization: organization ? String(organization).trim() : undefined,
+      passwordSalt: salt,
+      passwordHash: await hashPassword(String(password), salt),
+      isPasswordSet: true,
+      failedLoginAttempts: 0,
+      lockoutUntil: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      approvedBy: req.session!.userId,
+      approvedAt: new Date().toISOString(),
+    };
 
-  users.unshift(newUser);
-  writeUsers(users);
+    users.unshift(newUser);
+    writeUsers(users);
 
-  const { passwordSalt, passwordHash, ...safe } = newUser;
-  return res.status(201).json({ success: true, user: safe });
+    return res.status(201).json({ success: true, user: toSafeUser(newUser) });
+  })();
 });
 
-// 7. PUT update user
-app.put('/api/users/:id', (req: Request, res: Response) => {
+// 7. PUT update user (OWNER only)
+app.put('/api/users/:id', requireOwner, async (req: AuthenticatedRequest, res: Response) => {
   const { id } = req.params;
   const updates = req.body || {};
   const users = readUsers();
@@ -1893,19 +2131,32 @@ app.put('/api/users/:id', (req: Request, res: Response) => {
     }
   }
 
-  users[index] = {
+  const { passwordSalt, passwordHash, isPasswordSet, password: _pw, ...allowedUpdates } = updates || {};
+  const merged: StoredUserAccount = {
     ...user,
-    ...updates,
+    ...allowedUpdates,
+    id: user.id,
+    email: user.email,
     updatedAt: new Date().toISOString(),
   };
+  // Optional password reset by owner: { password: "new-secret" }
+  if (updates && typeof updates.password === 'string' && updates.password.length >= 8) {
+    const salt = generateSalt();
+    merged.passwordSalt = salt;
+    merged.passwordHash = await hashPassword(updates.password, salt);
+    merged.isPasswordSet = true;
+    merged.failedLoginAttempts = 0;
+    merged.lockoutUntil = null;
+    revokeSessionsForUser(merged.id);
+  }
+  users[index] = merged;
 
   writeUsers(users);
-  const { passwordSalt, passwordHash, ...safe } = users[index];
-  return res.json({ success: true, user: safe });
+  return res.json({ success: true, user: toSafeUser(users[index]) });
 });
 
-// 8. DELETE user
-app.delete('/api/users/:id', (req: Request, res: Response) => {
+// 8. DELETE user (OWNER only)
+app.delete('/api/users/:id', requireOwner, (req: AuthenticatedRequest, res: Response) => {
   const { id } = req.params;
   const users = readUsers();
   const user = users.find((u) => u.id === id);
@@ -1928,6 +2179,9 @@ app.delete('/api/users/:id', (req: Request, res: Response) => {
 });
 
 async function startServer() {
+  // Load the durable data snapshot BEFORE accepting traffic — auth depends on it.
+  await initDataStore();
+
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },

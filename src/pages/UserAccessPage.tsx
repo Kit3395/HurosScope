@@ -65,6 +65,7 @@ export const UserAccessPage: React.FC = () => {
   const [newUserName, setNewUserName] = useState('');
   const [newUserOrg, setNewUserOrg] = useState('');
   const [newUserRole, setNewUserRole] = useState<UserRole>('OPERATOR');
+  const [newUserPassword, setNewUserPassword] = useState('');
 
   // Form states for Edit User
   const [editName, setEditName] = useState('');
@@ -214,7 +215,7 @@ export const UserAccessPage: React.FC = () => {
     if (!confirmed) return;
 
     try {
-      const user = userAccessService.approveRequest(
+      const user = await userAccessService.approveRequest(
         request.id,
         roleToAssign,
         currentUser?.userId || 'admin'
@@ -226,10 +227,10 @@ export const UserAccessPage: React.FC = () => {
   };
 
   // Handle Reject Request
-  const handleConfirmReject = () => {
+  const handleConfirmReject = async () => {
     if (!rejectingRequestId) return;
     try {
-      const req = userAccessService.rejectRequest(
+      const req = await userAccessService.rejectRequest(
         rejectingRequestId,
         rejectReason || 'Administrative decision',
         currentUser?.userId || 'admin'
@@ -243,18 +244,23 @@ export const UserAccessPage: React.FC = () => {
   };
 
   // Handle Add User
-  const handleCreateUser = (e: React.FormEvent) => {
+  const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newUserEmail || !newUserName) return;
+    if (!newUserPassword || newUserPassword.length < 8) {
+      showAlert('error', 'A password of at least 8 characters is required for the new user.');
+      return;
+    }
 
     try {
-      const newUser = userAccessService.addUser(
+      const newUser = await userAccessService.addUser(
         {
           email: newUserEmail,
           displayName: newUserName,
           organization: newUserOrg,
           role: newUserRole,
           status: 'APPROVED',
+          password: newUserPassword,
         },
         currentUser?.userId || 'admin'
       );
@@ -265,18 +271,19 @@ export const UserAccessPage: React.FC = () => {
       setNewUserName('');
       setNewUserOrg('');
       setNewUserRole('OPERATOR');
+      setNewUserPassword('');
     } catch (err: any) {
       showAlert('error', err.message || 'Failed to create user.');
     }
   };
 
   // Handle Edit User
-  const handleSaveEditUser = (e: React.FormEvent) => {
+  const handleSaveEditUser = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingUser) return;
 
     try {
-      const updated = userAccessService.updateUser(
+      const updated = await userAccessService.updateUser(
         editingUser.id,
         {
           displayName: editName,
@@ -311,7 +318,7 @@ export const UserAccessPage: React.FC = () => {
     if (!confirmed) return;
 
     try {
-      userAccessService.deleteUser(user.id, currentUser?.userId || 'admin');
+      await userAccessService.deleteUser(user.id, currentUser?.userId || 'admin');
       showAlert('success', `User account for ${user.displayName} revoked and deleted.`);
     } catch (err: any) {
       showAlert('error', err.message || 'Failed to delete user.');
@@ -337,8 +344,8 @@ export const UserAccessPage: React.FC = () => {
     showAlert('warning', 'Supabase credentials cleared. Using Enterprise Vault storage.');
   };
 
-  const handleUnlockUser = (user: UserAccount) => {
-    const res = userAccessService.unlockAccount(user.id, currentUser?.displayName || 'admin');
+  const handleUnlockUser = async (user: UserAccount) => {
+    const res = await userAccessService.unlockAccount(user.id, currentUser?.displayName || 'admin');
     if (res.success) {
       setUsers(userAccessService.getAllUsers());
       showAlert('success', `Security lockout cleared for ${user.displayName}.`);
@@ -858,6 +865,21 @@ export const UserAccessPage: React.FC = () => {
                   value={newUserEmail}
                   onChange={(e) => setNewUserEmail(e.target.value)}
                   placeholder="e.g. jordan@horusscope.agency"
+                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 focus:border-cyan-500 focus:outline-hidden"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Initial Password <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="password"
+                  value={newUserPassword}
+                  onChange={(e) => setNewUserPassword(e.target.value)}
+                  placeholder="Min. 8 characters"
+                  minLength={8}
                   className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 focus:border-cyan-500 focus:outline-hidden"
                   required
                 />

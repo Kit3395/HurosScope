@@ -38,8 +38,10 @@ import {
 } from '../types';
 
 const SUPABASE_CONFIG_STORAGE_KEY = 'horusscope_supabase_config_v1';
-const DEFAULT_SUPABASE_URL = 'https://jnrgvkbmodcbwpteicoc.supabase.co';
-const DEFAULT_SUPABASE_ANON_KEY = 'sb_publishable_cOCvmaobmvNKvWYjH_1mQg_rlHgSKXQ';
+// NOTE: No default Supabase credentials are bundled. A previous default
+// project key shipped in the public repo and must be treated as compromised.
+// Configure Supabase via environment (VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY)
+// or the in-app Supabase settings modal.
 
 export interface SupabaseTableStats {
   businesses: number;
@@ -103,7 +105,6 @@ class SupabaseService {
       (import.meta as any).env?.VITE_SUPABASE_URL ||
       (import.meta as any).env?.NEXT_PUBLIC_SUPABASE_URL ||
       (import.meta as any).env?.SUPABASE_URL ||
-      DEFAULT_SUPABASE_URL ||
       '';
     const rawAnonKey =
       this.customAnonKey ||
@@ -112,7 +113,6 @@ class SupabaseService {
       (import.meta as any).env?.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
       (import.meta as any).env?.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
       (import.meta as any).env?.SUPABASE_ANON_KEY ||
-      DEFAULT_SUPABASE_ANON_KEY ||
       '';
 
     const url = rawUrl.startsWith('http') ? rawUrl.trim() : '';
@@ -160,7 +160,6 @@ class SupabaseService {
       (import.meta as any).env?.VITE_SUPABASE_URL ||
       (import.meta as any).env?.NEXT_PUBLIC_SUPABASE_URL ||
       (import.meta as any).env?.SUPABASE_URL ||
-      DEFAULT_SUPABASE_URL ||
       '';
     const rawAnonKey =
       this.customAnonKey ||
@@ -169,7 +168,6 @@ class SupabaseService {
       (import.meta as any).env?.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
       (import.meta as any).env?.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
       (import.meta as any).env?.SUPABASE_ANON_KEY ||
-      DEFAULT_SUPABASE_ANON_KEY ||
       '';
 
     const url = rawUrl.startsWith('http') ? rawUrl.trim() : '';

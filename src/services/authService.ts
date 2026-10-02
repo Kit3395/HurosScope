@@ -10,14 +10,15 @@
  * - Concurrent login attempts are guarded.
  */
 
-import { userAccessService } from './userAccessService';
 import { UserAccount } from '../types';
+import { setAuthToken } from './api';
 
 export interface AuthResponse {
   success: boolean;
   error?: string;
   user?: UserAccount;
   isLocked?: boolean;
+  remainingAttempts?: number;
 }
 
 const REMEMBERED_EMAIL_KEY = 'horusscope_auth_remembered_email_v1';
@@ -54,7 +55,8 @@ class AuthService {
   }
 
   /**
-   * Authenticate user credentials safely
+   * Authenticate against the HoruScope backend. Credentials are verified
+   * server-side; on success a Bearer session token is stored for API calls.
    */
   public async authenticate(
     email: string,
@@ -73,36 +75,32 @@ class AuthService {
     try {
       const cleanEmail = email.trim().toLowerCase();
 
-      // Delegate to verification layer
-      const result = await userAccessService.verifyCredentials(cleanEmail, password);
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: cleanEmail, password }),
+      });
+      const data = await res.json().catch(() => ({}));
 
-      if (result.success && result.user) {
-        // Handle remember me preference
+      if (res.ok && data.success && data.token && data.user) {
+        setAuthToken(data.token);
         this.setRememberedEmail(cleanEmail, rememberMe);
-
-        return {
-          success: true,
-          user: result.user,
-        };
+        return { success: true, user: data.user as UserAccount };
       }
 
-      // Check for security lockouts
-      if (result.isLocked) {
+      if (res.status === 401 && data.isLocked) {
         return {
           success: false,
           isLocked: true,
-          error: result.error || 'Account is temporarily locked. Please try again later.',
+          error: data.message || 'Account is temporarily locked. Please try again later.',
         };
       }
 
-      // Provide standard, secure error message without leaking user existence
-      const userMessage = result.error?.includes('attempt')
-        ? result.error
-        : 'Invalid email or password.';
-
       return {
         success: false,
-        error: userMessage,
+        error: data.message || 'Invalid email or password.',
+        remainingAttempts:
+          typeof data.remainingAttempts === 'number' ? data.remainingAttempts : undefined,
       };
     } catch (err: unknown) {
       // Never expose technical or stack trace errors
@@ -112,6 +110,20 @@ class AuthService {
       };
     } finally {
       this.isProcessing = false;
+    }
+  }
+
+  /** End the server session and drop the local token. */
+  public async logout(): Promise<void> {
+    try {
+      const token =
+        typeof window !== 'undefined' ? localStorage.getItem('horusscope_auth_token_v1') : null;
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      }).catch(() => {});
+    } finally {
+      setAuthToken(null);
     }
   }
 

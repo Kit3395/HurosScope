@@ -15,6 +15,7 @@ export interface GoogleUserProfile {
 export interface GoogleAuthResponse {
   success: boolean;
   profile?: GoogleUserProfile;
+  accessToken?: string;
   error?: string;
 }
 
@@ -178,6 +179,7 @@ export const googleAuthService = {
               const data = await userInfoRes.json();
               resolve({
                 success: true,
+                accessToken,
                 profile: {
                   sub: data.sub,
                   email: data.email,

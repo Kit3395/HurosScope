@@ -64,7 +64,7 @@ export const RequestAccessForm: React.FC<RequestAccessFormProps> = ({
     setIsLoading(true);
 
     try {
-      userAccessService.submitAccessRequest({
+      await userAccessService.submitAccessRequest({
         fullName: fullName.trim(),
         email: email.trim(),
         organization: organization.trim(),

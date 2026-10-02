@@ -1,10 +1,12 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { CurrentUserSession, UserAccount, UserPermission, UserRole } from '../types';
 import { authService } from '../security/auth';
+import { authService as loginService } from '../services/authService';
 import { userAccessService } from '../services/userAccessService';
 import { supabaseService } from '../services/supabaseService';
 import { auditService } from '../audit';
 import { GoogleUserProfile } from '../security/googleAuth';
+import { getAuthToken, setAuthToken, apiGet, apiPost } from '../services/api';
 
 interface AuthContextType {
   currentUser: CurrentUserSession | null;
@@ -12,7 +14,7 @@ interface AuthContextType {
   isLoading: boolean;
   pendingRequestsCount: number;
   login: (email: string, password?: string) => Promise<{ success: boolean; error?: string; remainingAttempts?: number; isLocked?: boolean }>;
-  loginWithGoogle: (googleProfile: GoogleUserProfile) => Promise<{ success: boolean; error?: string }>;
+  loginWithGoogle: (googleAccessToken: string) => Promise<{ success: boolean; error?: string }>;
   updatePassword: (newPassword: string) => Promise<{ success: boolean; error?: string }>;
   connectGoogleAccount: (googleProfile: GoogleUserProfile) => Promise<{ success: boolean; error?: string }>;
   disconnectGoogleAccount: () => Promise<{ success: boolean; error?: string }>;
@@ -24,13 +26,11 @@ interface AuthContextType {
     requestedRole: UserRole;
     reason: string;
   }) => Promise<{ success: boolean; error?: string; requestId?: string }>;
-  switchUserAccount: (userId: string) => void;
+  switchUserAccount: (userId: string) => Promise<void>;
   hasPermission: (permission: UserPermission) => boolean;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
-
-const AUTH_USER_KEY = 'horusscope_auth_current_user_v1';
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [currentUser, setCurrentUser] = useState<CurrentUserSession | null>(null);
@@ -38,44 +38,51 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [pendingRequestsCount, setPendingRequestsCount] = useState<number>(0);
 
-  // Initialize auth state on mount
+  // Initialize auth state on mount — validate the stored server session.
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem(AUTH_USER_KEY);
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        // Verify user still exists and is APPROVED
-        const account = userAccessService.getUserByEmail(parsed.email);
-        if (account && account.status === 'APPROVED') {
-          const session = authService.getSession();
-          // Synchronize session
-          authService.switchRole(account.role);
-          setCurrentUser({
-            ...session,
-            userId: account.id,
-            displayName: account.displayName,
-            email: account.email,
-            role: account.role,
-            organization: account.organization,
-            avatarUrl: account.avatarUrl,
-          });
-          setIsAuthenticated(true);
-        } else {
-          localStorage.removeItem(AUTH_USER_KEY);
+    let cancelled = false;
+    (async () => {
+      try {
+        const token = getAuthToken();
+        if (!token) {
           setIsAuthenticated(false);
           setCurrentUser(null);
+          return;
         }
-      } else {
-        // Not logged in: show Landing Page
+        // Validate the session against the server (single source of truth).
+        const data = await apiGet<{ success: boolean; user: UserAccount }>('/api/auth/me');
+        if (cancelled) return;
+        const account = data.user;
+        await userAccessService.syncFromServer();
+        // Non-owner sessions only see themselves in the mirror.
+        if (!userAccessService.getUserById(account.id)) {
+          userAccessService.seedMirrorWith([account]);
+        }
+        authService.switchRole(account.role);
+        const session = authService.getSession();
+        setCurrentUser({
+          ...session,
+          userId: account.id,
+          displayName: account.displayName,
+          email: account.email,
+          role: account.role,
+          organization: account.organization,
+          avatarUrl: account.avatarUrl,
+          authProvider: 'LOCAL',
+          isGoogleConnected: Boolean(account.isGoogleConnected),
+          sessionStartedAt: new Date().toISOString(),
+        });
+        setIsAuthenticated(true);
+      } catch {
+        // Invalid/expired session — drop it and show the login gate.
+        setAuthToken(null);
+        userAccessService.clearMirror();
         setIsAuthenticated(false);
         setCurrentUser(null);
+      } finally {
+        if (!cancelled) setIsLoading(false);
       }
-    } catch {
-      setIsAuthenticated(false);
-      setCurrentUser(null);
-    } finally {
-      setIsLoading(false);
-    }
+    })();
 
     // Refresh pending requests count
     setPendingRequestsCount(userAccessService.getPendingRequests().length);
@@ -85,7 +92,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setPendingRequestsCount(userAccessService.getPendingRequests().length);
     });
 
-    return () => unsubscribe();
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
   }, []);
 
   const login = async (
@@ -104,19 +114,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         };
       }
 
-      // Check against local user accounts registry with cryptographic verification
-      const verifyRes = await userAccessService.verifyCredentials(cleanEmail, password);
+      // Verify credentials against the backend server (never client-side).
+      const authRes = await loginService.authenticate(cleanEmail, password);
 
-      if (!verifyRes.success || !verifyRes.user) {
+      if (!authRes.success || !authRes.user) {
         return {
           success: false,
-          error: verifyRes.error || 'Authentication failed. Please verify your credentials.',
-          remainingAttempts: verifyRes.remainingAttempts,
-          isLocked: verifyRes.isLocked,
+          error: authRes.error || 'Authentication failed. Please verify your credentials.',
+          remainingAttempts: authRes.remainingAttempts,
+          isLocked: authRes.isLocked,
         };
       }
 
-      const account = verifyRes.user;
+      const account = authRes.user;
 
       // If Supabase is connected, optionally verify with Supabase Auth as secondary vault
       const supabase = supabaseService.getClient();
@@ -132,6 +142,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         } catch {
           // Graceful fallback
         }
+      }
+
+      // Populate the local user mirror from the server.
+      await userAccessService.syncFromServer();
+      if (!userAccessService.getUserById(account.id)) {
+        userAccessService.seedMirrorWith([account]);
       }
 
       // Update session in authService
@@ -153,7 +169,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       setCurrentUser(newSession);
       setIsAuthenticated(true);
-      localStorage.setItem(AUTH_USER_KEY, JSON.stringify(account));
 
       auditService.log({
         actorId: account.id,
@@ -173,20 +188,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const loginWithGoogle = async (
-    googleProfile: GoogleUserProfile
+    googleAccessToken: string
   ): Promise<{ success: boolean; error?: string }> => {
     setIsLoading(true);
     try {
-      const res = await userAccessService.connectGoogleAccount(googleProfile.email, googleProfile);
-
-      if (!res.success || !res.user) {
-        return {
-          success: false,
-          error: res.error || 'Google authentication failed. Identity not authorized.',
-        };
+      // Server validates the Google token with Google and mints a session
+      // only for a pre-approved, linked account.
+      const data = await apiPost<{ success: boolean; token: string; user: UserAccount }>(
+        '/api/auth/google',
+        { googleAccessToken }
+      );
+      if (!data.success || !data.token || !data.user) {
+        return { success: false, error: 'Google authentication failed.' };
       }
+      setAuthToken(data.token);
+      const account = data.user;
 
-      const account = res.user;
+      await userAccessService.syncFromServer();
+      if (!userAccessService.getUserById(account.id)) {
+        userAccessService.seedMirrorWith([account]);
+      }
 
       authService.switchRole(account.role);
       const session = authService.getSession();
@@ -198,7 +219,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         email: account.email,
         role: account.role,
         organization: account.organization,
-        avatarUrl: account.avatarUrl || googleProfile.picture,
+        avatarUrl: account.avatarUrl,
         authProvider: 'GOOGLE',
         isGoogleConnected: true,
         sessionStartedAt: new Date().toISOString(),
@@ -206,7 +227,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       setCurrentUser(newSession);
       setIsAuthenticated(true);
-      localStorage.setItem(AUTH_USER_KEY, JSON.stringify(account));
 
       auditService.log({
         actorId: account.id,
@@ -233,7 +253,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (res.success) {
       const updatedUser = userAccessService.getUserById(currentUser.userId);
       if (updatedUser) {
-        localStorage.setItem(AUTH_USER_KEY, JSON.stringify(updatedUser));
       }
     }
     return res;
@@ -251,7 +270,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       currentUser.userId
     );
     if (res.success && res.user) {
-      localStorage.setItem(AUTH_USER_KEY, JSON.stringify(res.user));
       setCurrentUser((prev) =>
         prev
           ? {
@@ -269,11 +287,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!currentUser) {
       return { success: false, error: 'No active user session.' };
     }
-    const res = userAccessService.disconnectGoogleAccount(currentUser.userId, currentUser.userId);
+    const res = await userAccessService.disconnectGoogleAccount(currentUser.userId, currentUser.userId);
     if (res.success) {
       const updatedUser = userAccessService.getUserById(currentUser.userId);
       if (updatedUser) {
-        localStorage.setItem(AUTH_USER_KEY, JSON.stringify(updatedUser));
       }
       setCurrentUser((prev) => (prev ? { ...prev, isGoogleConnected: false } : null));
     }
@@ -291,7 +308,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         changeSummary: `User ${currentUser.displayName} logged out.`,
       });
     }
-    localStorage.removeItem(AUTH_USER_KEY);
+    void loginService.logout();
+    userAccessService.clearMirror();
     setCurrentUser(null);
     setIsAuthenticated(false);
   };
@@ -304,7 +322,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     reason: string;
   }): Promise<{ success: boolean; error?: string; requestId?: string }> => {
     try {
-      const newReq = userAccessService.submitAccessRequest(data);
+      const newReq = await userAccessService.submitAccessRequest(data);
       setPendingRequestsCount(userAccessService.getPendingRequests().length);
       return { success: true, requestId: newReq.id };
     } catch (err: any) {
@@ -312,26 +330,36 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const switchUserAccount = (userId: string) => {
-    const user = userAccessService.getUserById(userId);
-    if (!user) return;
-
-    authService.switchRole(user.role);
-    const session = authService.getSession();
-
-    const updatedSession: CurrentUserSession = {
-      ...session,
-      userId: user.id,
-      displayName: user.displayName,
-      email: user.email,
-      role: user.role,
-      organization: user.organization,
-      avatarUrl: user.avatarUrl,
-    };
-
-    setCurrentUser(updatedSession);
-    setIsAuthenticated(true);
-    localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user));
+  // OWNER-only session impersonation, mediated by the server (no client-side bypass).
+  const switchUserAccount = async (userId: string) => {
+    try {
+      const data = await apiPost<{ success: boolean; token: string; user: UserAccount }>(
+        '/api/auth/impersonate',
+        { userId }
+      );
+      if (!data.success || !data.token || !data.user) return;
+      setAuthToken(data.token);
+      const user = data.user;
+      await userAccessService.syncFromServer();
+      if (!userAccessService.getUserById(user.id)) {
+        userAccessService.seedMirrorWith([user]);
+      }
+      authService.switchRole(user.role);
+      const session = authService.getSession();
+      setCurrentUser({
+        ...session,
+        userId: user.id,
+        displayName: user.displayName,
+        email: user.email,
+        role: user.role,
+        organization: user.organization,
+        avatarUrl: user.avatarUrl,
+        sessionStartedAt: new Date().toISOString(),
+      });
+      setIsAuthenticated(true);
+    } catch {
+      // impersonation failed — keep current session
+    }
   };
 
   const hasPermission = (permission: UserPermission): boolean => {
